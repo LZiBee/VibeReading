@@ -1,0 +1,126 @@
+.app-shell {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  grid-template-rows: 32px 1fr 24px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(15, 23, 31, 0.28);
+  z-index: 2000;
+}
+
+.confirm-modal {
+  width: min(420px, calc(100vw - 32px));
+  padding: 18px 18px 16px;
+  border: 1px solid rgba(20, 29, 38, 0.08);
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow:
+    0 20px 48px rgba(12, 20, 28, 0.18),
+    0 4px 12px rgba(12, 20, 28, 0.08);
+}
+
+.confirm-modal h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.confirm-modal p {
+  margin: 10px 0 0;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.confirm-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.confirm-modal-actions .note-toolbar-button {
+  min-width: 72px;
+}
+
+.prompt-modal {
+  width: min(460px, calc(100vw - 32px));
+}
+
+.prompt-modal-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.prompt-modal-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(20, 29, 38, 0.16);
+  border-radius: 6px;
+  background: #fbfcfd;
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+
+.prompt-modal-input:focus {
+  border-color: rgba(43, 103, 246, 0.55);
+  box-shadow: 0 0 0 2px rgba(43, 103, 246, 0.12);
+}
+
+.prompt-modal-error {
+  margin: 8px 0 0;
+  color: #b42318;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.mineru-notice {
+  position: fixed;
+  top: 48px;
+  right: 18px;
+  z-index: 2100;
+  max-width: min(360px, calc(100vw - 36px));
+  padding: 12px 14px;
+  border: 1px solid #d7dfe5;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 14px 28px rgba(31, 37, 43, 0.18);
+  backdrop-filter: blur(10px);
+}
+
+.mineru-notice.success {
+  border-color: #b7dfc3;
+  background: rgba(246, 255, 248, 0.98);
+}
+
+.mineru-notice.error {
+  border-color: #f0c6c6;
+  background: rgba(255, 248, 248, 0.98);
+}
+
+.mineru-notice-title {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mineru-notice-message {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}

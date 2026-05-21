@@ -1,0 +1,232 @@
+.titlebar {
+  display: grid;
+  grid-template-columns: minmax(330px, 1fr) minmax(300px, 540px) minmax(220px, 1fr);
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 140px 0 6px;
+  border-bottom: 1px solid var(--border-muted);
+  background: #fbfcfd;
+  -webkit-app-region: drag;
+}
+
+.brand,
+.runtime,
+.titlebar-left,
+.titlebar-center,
+.titlebar-actions,
+.menubar,
+.titlebar-status {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.titlebar-left {
+  gap: 10px;
+}
+
+.titlebar-center {
+  justify-content: center;
+  gap: 4px;
+}
+
+.titlebar-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.brand {
+  flex: 0 0 auto;
+  gap: 6px;
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.brand .codicon {
+  color: var(--accent);
+  font-size: 16px;
+}
+
+.menubar {
+  position: relative;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.menu-item,
+.nav-button {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  height: 24px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  -webkit-app-region: no-drag;
+}
+
+.menu-item {
+  padding: 0 7px;
+}
+
+.menu-item.active {
+  color: var(--text-primary);
+  background: var(--selection-bg);
+}
+
+.menu-item.icon-only {
+  width: 26px;
+  padding: 0;
+}
+
+.menu-popover-root {
+  position: relative;
+  -webkit-app-region: no-drag;
+}
+
+.menu-popover {
+  position: fixed;
+  top: 30px;
+  left: 202px;
+  z-index: 30;
+  display: grid;
+  min-width: 168px;
+  padding: 4px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 12px 28px rgba(22, 31, 38, 0.16);
+}
+
+.menu-popover-item {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 4px;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.menu-popover-item:hover {
+  background: var(--selection-bg);
+}
+
+.menu-popover-item .codicon {
+  color: var(--accent);
+}
+
+.nav-button {
+  width: 26px;
+}
+
+.command-center {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: min(100%, 480px);
+  height: 24px;
+  padding: 0 11px;
+  border: 1px solid var(--border-muted);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  background: #ffffff;
+  text-align: left;
+  -webkit-app-region: no-drag;
+}
+
+.command-center span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-center:hover,
+.menu-item:hover,
+.nav-button:hover,
+.wide-command:hover,
+.primary-button:hover,
+.tab:hover,
+.activity:hover,
+.section-header > button:hover,
+.section-header .section-header-actions > button:hover,
+.section-header .section-header-actions > .library-header-menu-anchor > button:hover,
+.toolbar button:hover,
+.header-icon-button:hover,
+.icon-button:hover {
+  background: var(--selection-bg);
+}
+
+.titlebar .command-center:hover,
+.titlebar .menu-item:hover,
+.titlebar .nav-button:hover {
+  color: var(--text-primary);
+  background: var(--selection-bg);
+}
+
+.runtime {
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.titlebar-status {
+  gap: 6px;
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.profile-avatar-button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  -webkit-app-region: no-drag;
+}
+
+.profile-avatar-button:hover,
+.profile-avatar-button.active {
+  background: var(--selection-bg);
+}
+
+.profile-avatar-small,
+.profile-avatar-large {
+  position: relative;
+  display: block;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 35%, #f6f7f8 0 17%, transparent 18%),
+    radial-gradient(circle at 50% 74%, #f6f7f8 0 27%, transparent 28%),
+    #a8b0b8;
+  box-shadow: inset 0 0 0 1px rgba(67, 75, 83, 0.16);
+}
+
+.profile-avatar-small {
+  width: 21px;
+  height: 21px;
+}
+
+.profile-avatar-large {
+  width: min(100%, 296px);
+  max-width: 296px;
+  aspect-ratio: 1;
+  margin: 0 auto;
+}

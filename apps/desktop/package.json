@@ -1,0 +1,44 @@
+{
+  "name": "@thesis-agent/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "node ./scripts/run-electron-vite.mjs dev",
+    "build": "node ./scripts/run-electron-vite.mjs build",
+    "preview": "node ./scripts/run-electron-vite.mjs preview",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@thesis-agent/ai": "0.1.0",
+    "@thesis-agent/citations": "0.1.0",
+    "@thesis-agent/db": "0.1.0",
+    "@thesis-agent/graph": "0.1.0",
+    "@thesis-agent/notes": "0.1.0",
+    "@thesis-agent/pdf": "0.1.0",
+    "@thesis-agent/rag": "0.1.0",
+    "@thesis-agent/shared": "0.1.0",
+    "@thesis-agent/ui": "0.1.0",
+    "@thesis-agent/workbench": "0.1.0",
+    "@vscode/codicons": "^0.0.36",
+    "katex": "^0.16.47",
+    "pdfjs-dist": "^5.7.284",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^2.1.8",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "useDefineForClassFields": true,
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@thesis-agent/ai": [
+        "packages/ai/src"
+      ],
+      "@thesis-agent/citations": [
+        "packages/citations/src"
+      ],
+      "@thesis-agent/db": [
+        "packages/db/src"
+      ],
+      "@thesis-agent/graph": [
+        "packages/graph/src"
+      ],
+      "@thesis-agent/notes": [
+        "packages/notes/src"
+      ],
+      "@thesis-agent/pdf": [
+        "packages/pdf/src"
+      ],
+      "@thesis-agent/rag": [
+        "packages/rag/src"
+      ],
+      "@thesis-agent/shared": [
+        "packages/shared/src"
+      ],
+      "@thesis-agent/ui": [
+        "packages/ui/src"
+      ],
+      "@thesis-agent/workbench": [
+        "packages/workbench/src"
+      ]
+    }
+  }
+}

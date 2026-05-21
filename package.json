@@ -1,0 +1,20 @@
+{
+  "name": "thesis-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI paper reading and knowledge graph workbench.",
+  "license": "UNLICENSED",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @thesis-agent/desktop",
+    "build": "npm run build -w @thesis-agent/desktop",
+    "typecheck": "npm run typecheck -w @thesis-agent/desktop",
+    "check": "npm run typecheck && npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
