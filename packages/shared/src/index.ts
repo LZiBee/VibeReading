@@ -47,6 +47,72 @@ export type MineruParseResult = {
   blocks: MineruParseBlock[]
 }
 
+export type CodeRepositoryImportantFileKind =
+  | 'readme'
+  | 'config'
+  | 'entry'
+  | 'source'
+  | 'notebook'
+  | 'script'
+  | 'other'
+
+export type CodeRepositoryImportantFile = {
+  path: string
+  kind: CodeRepositoryImportantFileKind
+  size: number
+}
+
+export type CodeRepositoryPreparationInput = {
+  paperPath: string
+  repositoryUrl: string
+}
+
+export type CodeRepositoryPreparationResult = {
+  repositoryUrl: string
+  normalizedUrl: string
+  owner: string
+  repo: string
+  cacheKey: string
+  cloned: boolean
+  reusedCache: boolean
+  commit?: string
+  branch?: string
+  fileCount: number
+  maxFiles: number
+  scanLimitReached: boolean
+  languageCounts: Record<string, number>
+  importantFiles: CodeRepositoryImportantFile[]
+  warnings: string[]
+}
+
+export function normalizeGitHubRepositoryUrl(input: string): {
+  normalizedUrl: string
+  owner: string
+  repo: string
+} | null {
+  const value = input.trim()
+  if (!value) {
+    return null
+  }
+
+  const match = value.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)/i)
+  if (!match) {
+    return null
+  }
+
+  const owner = cleanGitHubRepositoryPathSegment(match[1])
+  const repo = cleanGitHubRepositoryPathSegment(match[2]).replace(/\.git$/i, '')
+  if (!isValidGitHubRepositoryPathSegment(owner) || !isValidGitHubRepositoryPathSegment(repo)) {
+    return null
+  }
+
+  return {
+    normalizedUrl: `https://github.com/${owner}/${repo}`,
+    owner,
+    repo
+  }
+}
+
 type MineruRect = MineruParseBlock['rect']
 type MineruBlockSegment = NonNullable<MineruParseBlock['segments']>[number]
 type MineruBlockEntry = {
@@ -244,6 +310,17 @@ function isReadableMineruTextBlock(block: MineruParseBlock): boolean {
   )
 }
 
+function cleanGitHubRepositoryPathSegment(segment: string): string {
+  return segment
+    .replace(/^[^A-Za-z0-9]+/g, '')
+    .replace(/[.,;:!?\u3001\u3002\uff0c\uff1b\uff1a]+$/g, '')
+    .replace(/[^A-Za-z0-9_.-]+$/g, '')
+}
+
+function isValidGitHubRepositoryPathSegment(segment: string): boolean {
+  return /^[A-Za-z0-9_.-]{1,100}$/.test(segment) && !segment.startsWith('.') && !segment.endsWith('.')
+}
+
 function isLeftColumnMineruRect(rect: MineruRect): boolean {
   return rect.x <= 0.25 && rect.width >= 0.28 && rect.width <= 0.5 && rect.x + rect.width <= 0.58
 }
@@ -386,6 +463,297 @@ export type SourceRef = {
   }
   textHash?: string
   quote?: string
+}
+
+export type SelectionIntentKind = 'word' | 'phrase' | 'sentence' | 'paragraph'
+
+export type SelectionExplainRoute = 'dictionary' | 'translation' | 'fallback'
+
+export type SelectionIntent = {
+  kind: SelectionIntentKind
+  route: 'dictionary' | 'translation'
+  tokenCount: number
+  confidence: number
+  reason: string
+}
+
+export type DictionarySense = {
+  id?: EntityId
+  pos?: string
+  zh: string
+  en?: string
+  domain?: string
+  examples?: string[]
+}
+
+export type DictionaryPhrase = {
+  phrase: string
+  translation: string
+  note?: string
+  confidence?: number
+}
+
+export type DictionaryEntry = {
+  query: string
+  lemma: string
+  pos?: string
+  phonetic?: string
+  senses: DictionarySense[]
+  phrases: DictionaryPhrase[]
+  confidence: number
+  source?: string
+}
+
+export type SelectionExplainAiSettings = {
+  providerId: string
+  baseUrl: string
+  model: string
+  reasoningEffort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+  disableResponseStorage: boolean
+  requiresOpenAiAuth: boolean
+  apiKey?: string
+}
+
+export type SelectionExplainRequest = {
+  text: string
+  paperPath?: string
+  pageNo?: number
+  sourceRef?: SourceRef
+  targetLanguage?: 'zh-CN' | string
+  dictionaryEnabled?: boolean
+  ai?: SelectionExplainAiSettings
+}
+
+export type SelectionTranslationResult = {
+  sourceText: string
+  targetText: string
+  targetLanguage: string
+  model?: string
+}
+
+export type SelectionExplainResult = {
+  route: SelectionExplainRoute
+  intent: SelectionIntent
+  normalizedText: string
+  dictionary?: DictionaryEntry
+  translation?: SelectionTranslationResult
+  fallbackReason?: string
+  cached: boolean
+}
+
+export type BatchTranslationItem = {
+  id: EntityId
+  label?: string
+  text: string
+}
+
+export type BatchTranslationRequest = {
+  items: BatchTranslationItem[]
+  targetLanguage?: 'zh-CN' | string
+  ai?: SelectionExplainAiSettings
+}
+
+export type BatchTranslationResultItem = {
+  id: EntityId
+  targetText: string
+}
+
+export type BatchTranslationResult = {
+  items: BatchTranslationResultItem[]
+  targetLanguage: string
+  model?: string
+  rawText?: string
+}
+
+export type DeckSourceType = 'paper' | 'note' | 'selection' | 'conversation'
+
+export type DeckAudience = 'self-study' | 'group-meeting' | 'class-report' | 'thesis-defense'
+
+export type DeckLanguage = 'zh-CN' | 'en-US'
+
+export type DeckTone = 'academic' | 'briefing' | 'teaching'
+
+export type DeckIntent = {
+  sourceType: DeckSourceType
+  sourceIds: EntityId[]
+  audience: DeckAudience
+  language: DeckLanguage
+  tone: DeckTone
+  targetSlideCount: number
+  templateId?: string
+  includeReferences: boolean
+  includeAgenda: boolean
+  includeAppendix: boolean
+}
+
+export type SlideKind =
+  | 'cover'
+  | 'agenda'
+  | 'section'
+  | 'bullet'
+  | 'two-column'
+  | 'figure'
+  | 'table'
+  | 'quote'
+  | 'comparison'
+  | 'timeline'
+  | 'references'
+  | 'appendix'
+
+export type SlideElementSpec =
+  | {
+      type: 'text'
+      text: string
+      style?: 'body' | 'caption' | 'muted' | 'code'
+      sourceRefs?: SourceRef[]
+    }
+  | {
+      type: 'bullet-list'
+      items: string[]
+      style?: 'body' | 'caption' | 'muted'
+      sourceRefs?: SourceRef[]
+    }
+  | {
+      type: 'image'
+      assetId: EntityId
+      caption?: string
+      sourceRefs?: SourceRef[]
+    }
+  | {
+      type: 'table'
+      columns: string[]
+      rows: string[][]
+      sourceRefs?: SourceRef[]
+    }
+  | {
+      type: 'quote'
+      text: string
+      citationId?: EntityId
+      sourceRefs?: SourceRef[]
+    }
+  | {
+      type: 'formula'
+      latex: string
+      displayMode?: boolean
+      sourceRefs?: SourceRef[]
+    }
+  | {
+      type: 'diagram'
+      diagramKind: 'mermaid' | 'graphviz'
+      source: string
+      sourceRefs?: SourceRef[]
+    }
+
+export type SlideAssetKind = 'image' | 'screenshot' | 'formula-render' | 'diagram-render'
+
+export type SlideAssetRef = {
+  id: EntityId
+  kind: SlideAssetKind
+  mimeType?: string
+  uri?: string
+  width?: number
+  height?: number
+  alt?: string
+  sourceRefs: SourceRef[]
+}
+
+export type DeckCitationRef = {
+  id: EntityId
+  title: string
+  authors: string[]
+  year?: number
+  venue?: string
+  doi?: string
+  url?: string
+  sourceRefs: SourceRef[]
+}
+
+export type SlideSpec = {
+  id: EntityId
+  kind: SlideKind
+  title: string
+  notes?: string
+  elements: SlideElementSpec[]
+  sourceRefs: SourceRef[]
+}
+
+export type DeckSpec = {
+  title: string
+  subtitle?: string
+  themeId: string
+  language: DeckLanguage
+  audience: DeckAudience | string
+  slides: SlideSpec[]
+  assets: SlideAssetRef[]
+  citations: DeckCitationRef[]
+  meta: {
+    generatedAt: string
+    sourceIds: EntityId[]
+    generatorVersion: string
+  }
+}
+
+export type PptExportJobStatus =
+  | 'queued'
+  | 'collecting'
+  | 'outlining'
+  | 'drafting'
+  | 'rendering-assets'
+  | 'auditing'
+  | 'exporting'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export type PptExportJob = {
+  id: EntityId
+  sourceType: DeckSourceType
+  sourceIds: EntityId[]
+  intent: DeckIntent
+  deckSpec?: DeckSpec
+  themeId: string
+  status: PptExportJobStatus
+  progressMessage?: string
+  outputFilePath?: string
+  errorMessage?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type PptThemeConfig = {
+  id: string
+  name: string
+  fonts: {
+    heading: string
+    body: string
+    code: string
+  }
+  colors: {
+    background: string
+    surface: string
+    textPrimary: string
+    textSecondary: string
+    accent: string
+    muted: string
+    warning: string
+  }
+}
+
+export type PptAuditIssue = {
+  severity: 'info' | 'warning' | 'error'
+  code: string
+  message: string
+  slideId?: EntityId
+  assetId?: EntityId
+}
+
+export type PptExportResult = {
+  ok: boolean
+  outputPath?: string
+  slideCount: number
+  auditIssues: PptAuditIssue[]
+  errorCode?: string
+  message?: string
 }
 
 export type PaperSummary = {

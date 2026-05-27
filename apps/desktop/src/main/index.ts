@@ -4,9 +4,29 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, extname, join } from 'node:path'
 import { promisify } from 'node:util'
-import { noteTemplateKinds, normalizeNoteBlockStyle, noteToExportHtml } from '@thesis-agent/notes'
+import { lookupDictionary, normalizeSelectionText, resolveSelectionIntent } from '@thesis-agent/dictionary'
+import { noteTemplateKinds, normalizeNoteBlockStyle, noteToExportHtml, noteToMarkdown } from '@thesis-agent/notes'
 import type { NoteBlock, NoteBlockContent, NoteBlockType, NoteDocument, NoteTemplateKind } from '@thesis-agent/notes'
-import type { MineruModelVersion, MineruParseResult, SourceRef, SourceRefType } from '@thesis-agent/shared'
+import { exportDeckToPptx } from '@thesis-agent/ppt'
+import type {
+  BatchTranslationItem,
+  BatchTranslationRequest,
+  BatchTranslationResult,
+  DeckLanguage,
+  DeckSpec,
+  CodeRepositoryPreparationResult,
+  MineruModelVersion,
+  MineruParseResult,
+  PptExportResult,
+  SelectionExplainAiSettings,
+  SelectionExplainRequest,
+  SelectionExplainResult,
+  SlideAssetKind,
+  SlideElementSpec,
+  SlideKind,
+  SourceRef,
+  SourceRefType
+} from '@thesis-agent/shared'
 import {
   clearAllPersistedMineruResults,
   clearPersistedMineruResult,
@@ -16,14 +36,19 @@ import {
   writePersistedMineruResult,
   writePersistedAppState as writePersistedAppStateFromModule
 } from './appState'
+import { prepareCodeRepository } from './codeAnalysis'
 import { parsePdfWithMineru, type ParseMineruInput } from './mineru'
 import advancedRulesMarkdownSource from './prompts/advanced-rules.md?raw'
+import selectionTranslationPromptSource from './prompts/selection-translation.md?raw'
 
 const isDevelopment = Boolean(process.env.ELECTRON_RENDERER_URL)
 if (isDevelopment) {
   app.commandLine.appendSwitch('remote-debugging-port', '9222')
 }
 const execFileAsync = promisify(execFile)
+const selectionExplainCacheMaxSize = 80
+const selectionTranslationPromptVersion = 'selection-translation-v1'
+const selectionExplainCache = new Map<string, SelectionExplainResult>()
 
 type AiProviderTestInput = {
   providerId: string
@@ -45,6 +70,7 @@ type AiChatInput = Omit<AiProviderTestInput, 'prompt'> & {
   }>
   prompt: string
   attachments: AiImageAttachmentState[]
+  maxOutputTokens?: number
 }
 
 type AiProviderTestResult = {
@@ -90,7 +116,7 @@ type ChatCompletionMessage = {
 }
 
 type PrimaryView = 'library' | 'favorites' | 'note' | 'graph'
-type EditorTab = 'pdf' | 'profile'
+type EditorTab = 'pdf' | 'graph' | 'mindmap' | 'profile'
 type DockPanelId = 'library' | 'editor' | 'note' | 'ai'
 type ClosableDockPanelId = Exclude<DockPanelId, 'library'>
 type WorkbenchLayoutDirection = 'horizontal' | 'vertical'
@@ -141,14 +167,24 @@ type PdfLayoutSegmentsResult = {
   parser: 'poppler-bbox-layout'
   segments: PdfLayoutSegment[]
 }
-type NoteExportFormat = 'word' | 'pdf'
+type NoteExportFormat = 'word' | 'pdf' | 'markdown'
 type NoteExportInput = {
   format: NoteExportFormat
   note: NoteDocument
+  markdown?: string
 }
 type NoteExportResult = {
   canceled: boolean
   format: NoteExportFormat
+  filePath?: string
+}
+type PptDeckExportInput = {
+  deck: DeckSpec
+  suggestedFileName?: string
+  preferredFilePath?: string
+}
+type PptDeckExportResult = PptExportResult & {
+  canceled: boolean
   filePath?: string
 }
 type AppCaptureRect = {
@@ -382,6 +418,22 @@ const sourceRefTypeValues: SourceRefType[] = [
   'note',
   'note_block'
 ]
+const deckLanguageValues: DeckLanguage[] = ['zh-CN', 'en-US']
+const slideKindValues: SlideKind[] = [
+  'cover',
+  'agenda',
+  'section',
+  'bullet',
+  'two-column',
+  'figure',
+  'table',
+  'quote',
+  'comparison',
+  'timeline',
+  'references',
+  'appendix'
+]
+const slideAssetKindValues: SlideAssetKind[] = ['image', 'screenshot', 'formula-render', 'diagram-render']
 const noteTemplateKindValues: NoteTemplateKind[] = [...noteTemplateKinds]
 let stateWriteQueue: Promise<void> = Promise.resolve()
 
@@ -496,6 +548,10 @@ app.whenReady().then(() => {
     return exportNoteDocument(parseNoteExportInput(input))
   })
 
+  ipcMain.handle('ppt:export-deck', async (_event, input: unknown): Promise<PptDeckExportResult> => {
+    return exportPptDeck(parsePptDeckExportInput(input))
+  })
+
   ipcMain.handle('mineru:parse-pdf', async (_event, input: unknown): Promise<MineruParseResult> => {
     const parsedInput = parseMineruParseInput(input)
     const result = await parsePdfWithMineru(parsedInput)
@@ -529,6 +585,18 @@ app.whenReady().then(() => {
 
   ipcMain.handle('mineru:clear-all-cached-results', async (): Promise<number> => {
     return clearAllPersistedMineruResults()
+  })
+
+  ipcMain.handle('code-analysis:prepare-repository', async (_event, input: unknown): Promise<CodeRepositoryPreparationResult> => {
+    return prepareCodeRepository(input)
+  })
+
+  ipcMain.handle('selection:explain', async (_event, input: unknown): Promise<SelectionExplainResult> => {
+    return explainSelection(input)
+  })
+
+  ipcMain.handle('translation:batch', async (_event, input: unknown): Promise<BatchTranslationResult> => {
+    return translateBatch(input)
   })
 
   ipcMain.handle('ai:test-provider', async (_event, input: unknown): Promise<AiProviderTestResult> => {
@@ -584,6 +652,7 @@ app.whenReady().then(() => {
   ipcMain.handle('ai:send-message', async (_event, input: unknown): Promise<AiProviderTestResult> => {
     const chat = parseAiChatInput(input)
     const apiKey = chat.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim()
+    const maxOutputTokens = chat.maxOutputTokens ?? 2048
 
     if (chat.requiresOpenAiAuth && !apiKey) {
       return {
@@ -615,7 +684,7 @@ app.whenReady().then(() => {
             effort: chat.reasoningEffort
           },
           store: !chat.disableResponseStorage,
-          max_output_tokens: 2048
+          max_output_tokens: maxOutputTokens
         }
       },
       {
@@ -630,7 +699,7 @@ app.whenReady().then(() => {
             chat.prompt,
             chat.attachments
           ),
-          max_tokens: 2048,
+          max_tokens: maxOutputTokens,
           stream: false
         }
       }
@@ -683,6 +752,416 @@ function parseAiProviderTestInput(input: unknown): AiProviderTestInput {
     apiKey: typeof data.apiKey === 'string' ? data.apiKey : undefined,
     prompt
   }
+}
+
+async function explainSelection(input: unknown): Promise<SelectionExplainResult> {
+  const request = parseSelectionExplainInput(input)
+  const normalizedText = normalizeSelectionText(request.text)
+  const intent = resolveSelectionIntent(normalizedText)
+  const cacheKey = createSelectionExplainCacheKey(request, normalizedText)
+  const cachedResult = selectionExplainCache.get(cacheKey)
+  const shouldUseDictionary = request.dictionaryEnabled !== false
+
+  if (cachedResult) {
+    return {
+      ...cachedResult,
+      cached: true
+    }
+  }
+
+  if (intent.route === 'dictionary' && shouldUseDictionary) {
+    const dictionary = lookupDictionary(normalizedText)
+    if (dictionary) {
+      return rememberSelectionExplainResult(cacheKey, {
+        route: 'dictionary',
+        intent,
+        normalizedText,
+        dictionary,
+        cached: false
+      })
+    }
+
+    const translatedFallback = await translateSelectionWithAi(request, normalizedText)
+    if (translatedFallback) {
+      return rememberSelectionExplainResult(cacheKey, {
+        route: 'fallback',
+        intent,
+        normalizedText,
+        translation: translatedFallback,
+        fallbackReason: '本地词典未命中，已自动回退到翻译。',
+        cached: false
+      })
+    }
+
+    return {
+      route: 'fallback',
+      intent,
+      normalizedText,
+      fallbackReason: '本地词典暂未收录该词条或短语，且当前 AI 翻译不可用。',
+      cached: false
+    }
+  }
+
+  const translation = await translateSelectionWithAi(request, normalizedText)
+  if (translation) {
+    return rememberSelectionExplainResult(cacheKey, {
+      route: 'translation',
+      intent,
+      normalizedText,
+      translation,
+      cached: false
+    })
+  }
+
+  return {
+    route: 'fallback',
+    intent,
+    normalizedText,
+    fallbackReason: '翻译需要先在 AI 面板配置可用模型和 API Key。',
+    cached: false
+  }
+}
+
+async function translateBatch(input: unknown): Promise<BatchTranslationResult> {
+  const request = parseBatchTranslationInput(input)
+  const ai = request.ai
+  if (!ai?.baseUrl || !ai.model) {
+    throw new Error('全文翻译需要先配置翻译 AI 的 Base URL 和模型。')
+  }
+
+  const apiKey = ai.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim()
+  if (ai.requiresOpenAiAuth && !apiKey) {
+    throw new Error('全文翻译需要填写翻译 AI API Key，或在 AI 栏配置默认共享 API Key。')
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  }
+
+  if (ai.requiresOpenAiAuth && apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`
+  }
+
+  const prompt = buildBatchTranslationPrompt(request.items, request.targetLanguage || 'zh-CN')
+  const maxOutputTokens = getBatchTranslationMaxOutputTokens(request.items)
+  const response = await postAiResponsesWithChatFallback(
+    {
+      endpoint: joinApiUrl(ai.baseUrl, 'responses'),
+      headers,
+      successMessage: 'Batch translation received.',
+      maxAttempts: 2,
+      body: {
+        model: ai.model,
+        input: prompt,
+        reasoning: {
+          effort: ai.reasoningEffort
+        },
+        store: !ai.disableResponseStorage,
+        max_output_tokens: maxOutputTokens
+      }
+    },
+    {
+      endpoint: joinApiUrl(ai.baseUrl, 'chat/completions'),
+      headers,
+      successMessage: 'Batch translation received.',
+      maxAttempts: 2,
+      body: {
+        model: ai.model,
+        messages: buildChatCompletionMessages('', [], prompt),
+        max_tokens: maxOutputTokens,
+        stream: false
+      }
+    }
+  )
+
+  if (!response.ok || !response.outputText?.trim()) {
+    throw new Error(response.message || 'AI 未返回可用译文。')
+  }
+
+  return {
+    items: parseBatchTranslationOutput(response.outputText, request.items),
+    targetLanguage: request.targetLanguage || 'zh-CN',
+    model: ai.model,
+    rawText: response.outputText
+  }
+}
+
+function parseSelectionExplainInput(input: unknown): SelectionExplainRequest {
+  if (!isRecord(input)) {
+    throw new Error('Invalid selection explain input.')
+  }
+
+  const text = readLimitedString(input.text, 6000, '')
+  if (!text) {
+    throw new Error('Missing selection text.')
+  }
+
+  return {
+    text,
+    paperPath: readOptionalLimitedString(input.paperPath, 2000),
+    pageNo: typeof input.pageNo === 'number' && Number.isFinite(input.pageNo) ? input.pageNo : undefined,
+    sourceRef: sanitizeSourceRefs([input.sourceRef])[0],
+    targetLanguage: readLimitedString(input.targetLanguage, 40, 'zh-CN'),
+    dictionaryEnabled: typeof input.dictionaryEnabled === 'boolean' ? input.dictionaryEnabled : true,
+    ai: sanitizeSelectionExplainAiSettings(input.ai)
+  }
+}
+
+function parseBatchTranslationInput(input: unknown): BatchTranslationRequest {
+  if (!isRecord(input)) {
+    throw new Error('Invalid batch translation input.')
+  }
+
+  const items = Array.isArray(input.items)
+    ? input.items
+        .slice(0, 10)
+        .map((item, index): BatchTranslationItem | null => {
+          if (!isRecord(item)) {
+            return null
+          }
+
+          const id = readLimitedString(item.id, 140, `block-${index + 1}`)
+          const text = readLimitedString(item.text, 12000, '')
+          if (!id || !text) {
+            return null
+          }
+
+          return {
+            id,
+            label: readOptionalLimitedString(item.label, 240),
+            text
+          }
+        })
+        .filter((item): item is BatchTranslationItem => Boolean(item))
+    : []
+
+  if (items.length === 0) {
+    throw new Error('Missing translation blocks.')
+  }
+
+  return {
+    items,
+    targetLanguage: readLimitedString(input.targetLanguage, 40, 'zh-CN'),
+    ai: sanitizeSelectionExplainAiSettings(input.ai)
+  }
+}
+
+function sanitizeSelectionExplainAiSettings(input: unknown): SelectionExplainAiSettings | undefined {
+  if (!isRecord(input)) {
+    return undefined
+  }
+
+  const reasoningEffort = readLimitedString(input.reasoningEffort, 20, 'medium')
+  if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(reasoningEffort)) {
+    return undefined
+  }
+
+  return {
+    providerId: readLimitedString(input.providerId, 140, ''),
+    baseUrl: readLimitedString(input.baseUrl, 2000, ''),
+    model: readLimitedString(input.model, 200, ''),
+    reasoningEffort: reasoningEffort as SelectionExplainAiSettings['reasoningEffort'],
+    disableResponseStorage: typeof input.disableResponseStorage === 'boolean' ? input.disableResponseStorage : true,
+    requiresOpenAiAuth: typeof input.requiresOpenAiAuth === 'boolean' ? input.requiresOpenAiAuth : true,
+    apiKey: readOptionalLimitedString(input.apiKey, 4000)
+  }
+}
+
+function buildBatchTranslationPrompt(items: BatchTranslationItem[], targetLanguage: string): string {
+  return [
+    '你是论文阅读软件里的全文对照翻译器。',
+    `目标语言：${targetLanguage}`,
+    '',
+    '请翻译下面 JSON 数组中的每个 MinerU block。',
+    '要求：',
+    '- 只翻译每个 item.text，不扩写、不解释、不总结。',
+    '- 保留公式、变量名、引用标记、括号中的缩写和关键英文术语。',
+    '- 保留原文里的段内换行、编号、列表语气和学术表达。',
+    '- 如果文本已经是目标语言，只做必要的术语顺滑和格式整理。',
+    '- 必须返回所有输入 id，id 不能改写，不能漏项。',
+    '- 只输出一个 JSON 对象，不要输出 Markdown、代码围栏、标题或寒暄。',
+    '',
+    '输出 JSON 结构必须是：',
+    '{"translations":[{"id":"原 id","targetText":"译文"}]}',
+    '',
+    'MinerU blocks：',
+    JSON.stringify(
+      items.map((item) => ({
+        id: item.id,
+        label: item.label,
+        text: item.text
+      })),
+      null,
+      2
+    )
+  ].join('\n')
+}
+
+function getBatchTranslationMaxOutputTokens(items: BatchTranslationItem[]): number {
+  const totalLength = items.reduce((sum, item) => sum + item.text.length, 0)
+  return Math.min(8192, Math.max(1600, Math.ceil(totalLength / 2)))
+}
+
+function parseBatchTranslationOutput(outputText: string, expectedItems: BatchTranslationItem[]): BatchTranslationResult['items'] {
+  const jsonText = extractJsonTextFromAiOutput(outputText)
+  if (!jsonText) {
+    throw new Error('AI 没有返回可解析的批量翻译 JSON。')
+  }
+
+  const parsed: unknown = JSON.parse(jsonText)
+  const rawItems = Array.isArray(parsed)
+    ? parsed
+    : isRecord(parsed)
+      ? parsed.translations ?? parsed.items ?? parsed.blocks
+      : undefined
+
+  if (!Array.isArray(rawItems)) {
+    throw new Error('AI 批量翻译 JSON 中缺少 translations 数组。')
+  }
+
+  const expectedIds = new Set(expectedItems.map((item) => item.id))
+  return rawItems
+    .map((item): BatchTranslationResult['items'][number] | null => {
+      if (!isRecord(item)) {
+        return null
+      }
+
+      const id = readLimitedString(item.id, 140, '')
+      const targetText =
+        readOptionalLimitedString(item.targetText, 60000) ??
+        readOptionalLimitedString(item.translation, 60000) ??
+        readOptionalLimitedString(item.text, 60000) ??
+        ''
+
+      if (!id || !expectedIds.has(id) || !targetText) {
+        return null
+      }
+
+      return { id, targetText }
+    })
+    .filter((item): item is BatchTranslationResult['items'][number] => Boolean(item))
+}
+
+function extractJsonTextFromAiOutput(input: string): string | undefined {
+  const trimmed = input.trim()
+  const fenceMatch = /^```(?:json)?\s*([\s\S]*?)```\s*$/i.exec(trimmed)
+  const candidate = fenceMatch?.[1]?.trim() || trimmed
+  const objectStart = candidate.indexOf('{')
+  const arrayStart = candidate.indexOf('[')
+
+  if (objectStart === -1 && arrayStart === -1) {
+    return undefined
+  }
+
+  if (arrayStart !== -1 && (objectStart === -1 || arrayStart < objectStart)) {
+    const arrayEnd = candidate.lastIndexOf(']')
+    return arrayEnd > arrayStart ? candidate.slice(arrayStart, arrayEnd + 1) : undefined
+  }
+
+  const objectEnd = candidate.lastIndexOf('}')
+  return objectEnd > objectStart ? candidate.slice(objectStart, objectEnd + 1) : undefined
+}
+
+async function translateSelectionWithAi(
+  request: SelectionExplainRequest,
+  normalizedText: string
+): Promise<SelectionExplainResult['translation'] | undefined> {
+  const ai = request.ai
+  if (!ai?.baseUrl || !ai.model) {
+    return undefined
+  }
+
+  const apiKey = ai.apiKey?.trim() || process.env.OPENAI_API_KEY?.trim()
+  if (ai.requiresOpenAiAuth && !apiKey) {
+    return undefined
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  }
+
+  if (ai.requiresOpenAiAuth && apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`
+  }
+
+  const targetLanguage = request.targetLanguage || 'zh-CN'
+  const prompt = buildSelectionTranslationPrompt(normalizedText, targetLanguage)
+  const response = await postAiResponsesWithChatFallback(
+    {
+      endpoint: joinApiUrl(ai.baseUrl, 'responses'),
+      headers,
+      successMessage: 'Selection translation received.',
+      maxAttempts: 2,
+      body: {
+        model: ai.model,
+        input: prompt,
+        reasoning: {
+          effort: ai.reasoningEffort
+        },
+        store: !ai.disableResponseStorage,
+        max_output_tokens: 1200
+      }
+    },
+    {
+      endpoint: joinApiUrl(ai.baseUrl, 'chat/completions'),
+      headers,
+      successMessage: 'Selection translation received.',
+      maxAttempts: 2,
+      body: {
+        model: ai.model,
+        messages: buildChatCompletionMessages('', [], prompt),
+        max_tokens: 1200,
+        stream: false
+      }
+    }
+  )
+
+  if (!response.ok) {
+    return undefined
+  }
+
+  const targetText = (response.outputText || response.message).trim()
+  if (!targetText) {
+    return undefined
+  }
+
+  return {
+    sourceText: normalizedText,
+    targetText,
+    targetLanguage,
+    model: ai.model
+  }
+}
+
+function buildSelectionTranslationPrompt(text: string, targetLanguage: string): string {
+  return selectionTranslationPromptSource
+    .replaceAll('{{targetLanguage}}', targetLanguage)
+    .replaceAll('{{text}}', text)
+}
+
+function createSelectionExplainCacheKey(request: SelectionExplainRequest, normalizedText: string): string {
+  const ai = request.ai
+  const modelKey = ai ? `${ai.providerId}:${hashString(ai.baseUrl)}:${ai.model}` : 'no-ai'
+
+  return [
+    hashString(normalizedText),
+    request.targetLanguage || 'zh-CN',
+    request.dictionaryEnabled === false ? 'no-dictionary' : 'dictionary',
+    modelKey,
+    selectionTranslationPromptVersion
+  ].join('|')
+}
+
+function rememberSelectionExplainResult(cacheKey: string, result: SelectionExplainResult): SelectionExplainResult {
+  if (selectionExplainCache.size >= selectionExplainCacheMaxSize) {
+    const oldestKey = selectionExplainCache.keys().next().value
+    if (oldestKey) {
+      selectionExplainCache.delete(oldestKey)
+    }
+  }
+
+  selectionExplainCache.set(cacheKey, result)
+  return result
 }
 
 function parseMineruParseInput(input: unknown): ParseMineruInput {
@@ -1317,7 +1796,7 @@ function sanitizeNoteBlockContent(type: NoteBlockType, input: unknown): NoteBloc
     const rows = Array.isArray(data.rows)
       ? data.rows
           .filter(Array.isArray)
-          .map((row) => row.map((cell) => readLimitedString(cell, 2000, '')).slice(0, 20))
+          .map((row) => row.map((cell) => readLimitedString(cell, 8000, '')).slice(0, 20))
           .slice(0, 80)
       : [['', '']]
 
@@ -1391,6 +1870,274 @@ function sanitizeSourceRefs(input: unknown): SourceRef[] {
     })
     .filter((ref): ref is SourceRef => Boolean(ref))
     .slice(0, 40)
+}
+
+function sanitizeDeckSpec(input: unknown): DeckSpec | undefined {
+  if (!isRecord(input)) {
+    return undefined
+  }
+
+  const slides = sanitizeSlideSpecs(input.slides)
+  if (slides.length === 0) {
+    return undefined
+  }
+
+  const title = readLimitedString(input.title, 160, '未命名 PPT')
+  const audience = typeof input.audience === 'string' && input.audience.trim() ? input.audience.trim().slice(0, 80) : 'group-meeting'
+
+  return {
+    title,
+    subtitle: readOptionalLimitedString(input.subtitle, 240),
+    themeId: readLimitedString(input.themeId, 80, 'academic-clean'),
+    language: isDeckLanguage(input.language) ? input.language : 'zh-CN',
+    audience,
+    slides,
+    assets: sanitizeSlideAssets(input.assets),
+    citations: sanitizeDeckCitations(input.citations),
+    meta: sanitizeDeckMeta(input.meta)
+  }
+}
+
+function sanitizeSlideSpecs(input: unknown): DeckSpec['slides'] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input
+    .map(sanitizeSlideSpec)
+    .filter((slide): slide is DeckSpec['slides'][number] => Boolean(slide))
+    .slice(0, 40)
+}
+
+function sanitizeSlideSpec(input: unknown): DeckSpec['slides'][number] | undefined {
+  if (!isRecord(input)) {
+    return undefined
+  }
+
+  const elements = sanitizeSlideElements(input.elements)
+
+  return {
+    id: readLimitedString(input.id, 140, `slide_${randomUUID()}`),
+    kind: isSlideKind(input.kind) ? input.kind : 'bullet',
+    title: readLimitedString(input.title, 140, '未命名页面'),
+    notes: readOptionalLimitedString(input.notes, 2000),
+    elements,
+    sourceRefs: sanitizeSourceRefs(input.sourceRefs)
+  }
+}
+
+function sanitizeSlideElements(input: unknown): SlideElementSpec[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input
+    .map(sanitizeSlideElement)
+    .filter((element): element is SlideElementSpec => Boolean(element))
+    .slice(0, 12)
+}
+
+function sanitizeSlideElement(input: unknown): SlideElementSpec | undefined {
+  if (!isRecord(input) || typeof input.type !== 'string') {
+    return undefined
+  }
+
+  const sourceRefs = sanitizeSourceRefs(input.sourceRefs)
+
+  switch (input.type) {
+    case 'text':
+      return {
+        type: 'text',
+        text: readLimitedString(input.text, 3000, ''),
+        style: isTextElementStyle(input.style) ? input.style : undefined,
+        sourceRefs
+      }
+    case 'bullet-list': {
+      const items = sanitizeStringArray(input.items, 8, 180)
+      return items.length > 0
+        ? {
+            type: 'bullet-list',
+            items,
+            style: isBulletElementStyle(input.style) ? input.style : undefined,
+            sourceRefs
+          }
+        : undefined
+    }
+    case 'image': {
+      const assetId = readOptionalLimitedString(input.assetId, 140)
+      return assetId
+        ? {
+            type: 'image',
+            assetId,
+            caption: readOptionalLimitedString(input.caption, 240),
+            sourceRefs
+          }
+        : undefined
+    }
+    case 'table': {
+      const columns = sanitizeStringArray(input.columns, 8, 120)
+      const rows = sanitizeTableRows(input.rows)
+      return columns.length > 0
+        ? {
+            type: 'table',
+            columns,
+            rows,
+            sourceRefs
+          }
+        : undefined
+    }
+    case 'quote':
+      return {
+        type: 'quote',
+        text: readLimitedString(input.text, 1800, ''),
+        citationId: readOptionalLimitedString(input.citationId, 140),
+        sourceRefs
+      }
+    case 'formula':
+      return {
+        type: 'formula',
+        latex: readLimitedString(input.latex, 1600, ''),
+        displayMode: input.displayMode === true,
+        sourceRefs
+      }
+    case 'diagram':
+      return {
+        type: 'diagram',
+        diagramKind: input.diagramKind === 'graphviz' ? 'graphviz' : 'mermaid',
+        source: readLimitedString(input.source, 4000, ''),
+        sourceRefs
+      }
+    default:
+      return undefined
+  }
+}
+
+function sanitizeSlideAssets(input: unknown): DeckSpec['assets'] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input
+    .map((item): DeckSpec['assets'][number] | undefined => {
+      if (!isRecord(item)) {
+        return undefined
+      }
+
+      const id = readOptionalLimitedString(item.id, 140)
+      if (!id) {
+        return undefined
+      }
+
+      return {
+        id,
+        kind: isSlideAssetKind(item.kind) ? item.kind : 'image',
+        mimeType: isSafePptAssetDataUrl(item.uri) ? readPptDataUrlMimeType(item.uri) : readOptionalLimitedString(item.mimeType, 80),
+        uri: isSafePptAssetDataUrl(item.uri) ? item.uri : undefined,
+        width: typeof item.width === 'number' && Number.isFinite(item.width) ? clampNumber(item.width, 1, 20000, item.width) : undefined,
+        height: typeof item.height === 'number' && Number.isFinite(item.height) ? clampNumber(item.height, 1, 20000, item.height) : undefined,
+        alt: readOptionalLimitedString(item.alt, 240),
+        sourceRefs: sanitizeSourceRefs(item.sourceRefs)
+      }
+    })
+    .filter((asset): asset is DeckSpec['assets'][number] => Boolean(asset))
+    .slice(0, 80)
+}
+
+function sanitizeDeckCitations(input: unknown): DeckSpec['citations'] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input
+    .map((item): DeckSpec['citations'][number] | undefined => {
+      if (!isRecord(item)) {
+        return undefined
+      }
+
+      const id = readOptionalLimitedString(item.id, 140)
+      const title = readOptionalLimitedString(item.title, 500)
+      if (!id || !title) {
+        return undefined
+      }
+
+      return {
+        id,
+        title,
+        authors: sanitizeStringArray(item.authors, 16, 120),
+        year: typeof item.year === 'number' && Number.isInteger(item.year) ? clampInteger(item.year, 1500, 3000, item.year) : undefined,
+        venue: readOptionalLimitedString(item.venue, 240),
+        doi: readOptionalLimitedString(item.doi, 160),
+        url: readOptionalLimitedString(item.url, 600),
+        sourceRefs: sanitizeSourceRefs(item.sourceRefs)
+      }
+    })
+    .filter((citation): citation is DeckSpec['citations'][number] => Boolean(citation))
+    .slice(0, 120)
+}
+
+function sanitizeDeckMeta(input: unknown): DeckSpec['meta'] {
+  const data = isRecord(input) ? input : {}
+
+  return {
+    generatedAt: readIsoLikeString(data.generatedAt),
+    sourceIds: sanitizeStringArray(data.sourceIds, 80, 160),
+    generatorVersion: readLimitedString(data.generatorVersion, 120, 'unknown')
+  }
+}
+
+function sanitizeStringArray(input: unknown, maxItems: number, maxLength: number): string[] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input
+    .map((item) => (typeof item === 'string' ? item.trim().slice(0, maxLength) : ''))
+    .filter(Boolean)
+    .slice(0, maxItems)
+}
+
+function sanitizeTableRows(input: unknown): string[][] {
+  if (!Array.isArray(input)) {
+    return []
+  }
+
+  return input
+    .map((row) => sanitizeStringArray(row, 8, 160))
+    .filter((row) => row.length > 0)
+    .slice(0, 16)
+}
+
+function isSafePptAssetDataUrl(input: unknown): input is string {
+  return (
+    typeof input === 'string' &&
+    input.length <= 24_000_000 &&
+    /^data:image\/(?:png|jpeg|jpg|webp);base64,/i.test(input)
+  )
+}
+
+function readPptDataUrlMimeType(dataUrl: string): string | undefined {
+  const match = /^data:([^;,]+)[;,]/i.exec(dataUrl)
+  return match?.[1]
+}
+
+function isDeckLanguage(input: unknown): input is DeckLanguage {
+  return typeof input === 'string' && deckLanguageValues.includes(input as DeckLanguage)
+}
+
+function isSlideKind(input: unknown): input is SlideKind {
+  return typeof input === 'string' && slideKindValues.includes(input as SlideKind)
+}
+
+function isSlideAssetKind(input: unknown): input is SlideAssetKind {
+  return typeof input === 'string' && slideAssetKindValues.includes(input as SlideAssetKind)
+}
+
+function isTextElementStyle(input: unknown): input is Extract<SlideElementSpec, { type: 'text' }>['style'] {
+  return input === 'body' || input === 'caption' || input === 'muted' || input === 'code'
+}
+
+function isBulletElementStyle(input: unknown): input is Extract<SlideElementSpec, { type: 'bullet-list' }>['style'] {
+  return input === 'body' || input === 'caption' || input === 'muted'
 }
 
 function isNoteMediaWrapStyle(input: unknown): input is 'break' | 'center' | 'float-left' | 'float-right' {
@@ -1563,7 +2310,14 @@ function parseNoteExportInput(input: unknown): NoteExportInput {
     throw new Error('Invalid note export input.')
   }
 
-  const format = input.format === 'pdf' ? 'pdf' : input.format === 'word' ? 'word' : undefined
+  const format =
+    input.format === 'pdf'
+      ? 'pdf'
+      : input.format === 'word'
+        ? 'word'
+        : input.format === 'markdown'
+          ? 'markdown'
+          : undefined
   const note = sanitizeNoteDocument('export.pdf', input.note)
 
   if (!format) {
@@ -1576,13 +2330,31 @@ function parseNoteExportInput(input: unknown): NoteExportInput {
 
   return {
     format,
-    note
+    note,
+    markdown: readOptionalLimitedString(input.markdown, 1000000)
+  }
+}
+
+function parsePptDeckExportInput(input: unknown): PptDeckExportInput {
+  if (!isRecord(input)) {
+    throw new Error('Invalid PPT export input.')
+  }
+
+  const deck = sanitizeDeckSpec(input.deck)
+  if (!deck) {
+    throw new Error('Invalid DeckSpec.')
+  }
+
+  return {
+    deck,
+    suggestedFileName: readOptionalLimitedString(input.suggestedFileName, 120),
+    preferredFilePath: readOptionalLimitedString(input.preferredFilePath, 400)
   }
 }
 
 async function exportNoteDocument(input: NoteExportInput): Promise<NoteExportResult> {
-  const extension = input.format === 'pdf' ? 'pdf' : 'doc'
-  const label = input.format === 'pdf' ? 'PDF' : 'Word'
+  const extension = input.format === 'pdf' ? 'pdf' : input.format === 'word' ? 'doc' : 'md'
+  const label = input.format === 'pdf' ? 'PDF' : input.format === 'word' ? 'Word' : 'Markdown'
   const result = await dialog.showSaveDialog({
     title: `导出笔记为 ${label}`,
     defaultPath: `${sanitizeExportFileName(input.note.title)}.${extension}`,
@@ -1592,10 +2364,15 @@ async function exportNoteDocument(input: NoteExportInput): Promise<NoteExportRes
             name: 'PDF',
             extensions: ['pdf']
           }
-        : {
+        : input.format === 'word'
+          ? {
             name: 'Word 文档',
             extensions: ['doc']
           }
+          : {
+              name: 'Markdown 文档',
+              extensions: ['md', 'markdown']
+            }
     ]
   })
 
@@ -1603,6 +2380,15 @@ async function exportNoteDocument(input: NoteExportInput): Promise<NoteExportRes
     return {
       canceled: true,
       format: input.format
+    }
+  }
+
+  if (input.format === 'markdown') {
+    await writeFile(result.filePath, input.markdown?.trim() || noteToMarkdown(input.note), 'utf8')
+    return {
+      canceled: false,
+      format: input.format,
+      filePath: result.filePath
     }
   }
 
@@ -1624,6 +2410,76 @@ async function exportNoteDocument(input: NoteExportInput): Promise<NoteExportRes
     canceled: false,
     format: input.format,
     filePath: result.filePath
+  }
+}
+
+async function exportPptDeck(input: PptDeckExportInput): Promise<PptDeckExportResult> {
+  const result = await dialog.showSaveDialog({
+    title: '导出 PPT',
+    defaultPath: input.preferredFilePath?.trim() || `${sanitizeExportFileName(input.suggestedFileName ?? input.deck.title)}.pptx`,
+    filters: [
+      {
+        name: 'PowerPoint 演示文稿',
+        extensions: ['pptx']
+      }
+    ]
+  })
+
+  if (result.canceled || !result.filePath) {
+    return {
+      canceled: true,
+      ok: false,
+      slideCount: input.deck.slides.length,
+      auditIssues: [],
+      message: '已取消 PPT 导出。'
+    }
+  }
+
+  let exportResult: PptExportResult
+  try {
+    exportResult = await exportDeckToPptx({
+      deck: input.deck,
+      outputPath: result.filePath,
+      resolveAsset: (asset) => (isSafePptAssetDataUrl(asset.uri) ? asset.uri : undefined)
+    })
+  } catch (error) {
+    const normalizedError = normalizePptExportError(error)
+    return {
+      canceled: false,
+      ok: false,
+      outputPath: result.filePath,
+      filePath: result.filePath,
+      slideCount: input.deck.slides.length,
+      auditIssues: [],
+      errorCode: normalizedError.code,
+      message: normalizedError.message
+    }
+  }
+
+  return {
+    ...exportResult,
+    canceled: false,
+    filePath: exportResult.outputPath
+  }
+}
+
+function normalizePptExportError(error: unknown): { code: string; message: string } {
+  const rawMessage = error instanceof Error ? error.message.trim() : ''
+  const rawCode = isNodeError(error) && typeof error.code === 'string' ? error.code.trim().toUpperCase() : ''
+  const busyByMessage =
+    /busy or locked|being used by another process|resource busy|file is in use|permission denied/i.test(rawMessage)
+  const isBusyError = rawCode === 'EBUSY' || rawCode === 'EPERM' || rawCode === 'EACCES' || busyByMessage
+
+  if (isBusyError) {
+    return {
+      code: 'FILE_BUSY',
+      message: '文件正在被占用，暂时无法保存 PPT。请先关闭已打开的 PPT、图片预览或同步程序后重试，或另存为其他文件。'
+    }
+  }
+
+  return {
+    code: rawCode || 'EXPORT_FAILED',
+    message: rawMessage ? `保存 PPT 失败：${rawMessage}` : '保存 PPT 失败，请重试。'
   }
 }
 
@@ -2148,7 +3004,7 @@ function isPrimaryView(input: unknown): input is PrimaryView {
 }
 
 function isEditorTab(input: unknown): input is EditorTab {
-  return input === 'pdf' || input === 'profile'
+  return input === 'pdf' || input === 'graph' || input === 'mindmap' || input === 'profile'
 }
 
 function isDockPanelId(input: unknown): input is DockPanelId {
@@ -2221,7 +3077,8 @@ function parseAiChatInput(input: unknown): AiChatInput {
         ? data.systemPrompt.trim()
         : 'You are Inspiration, a careful research paper reading assistant. Answer clearly and cite paper evidence when context is provided.',
     messages,
-    attachments: sanitizeAiImageAttachments(data.attachments)
+    attachments: sanitizeAiImageAttachments(data.attachments),
+    maxOutputTokens: clampInteger(data.maxOutputTokens, 256, 8192, 2048)
   }
 }
 
@@ -2475,6 +3332,10 @@ function shouldFallbackToChatCompletions(result: AiProviderTestResult): boolean 
   }
 
   if (result.status === 400 || result.status === 404 || result.status === 405) {
+    return true
+  }
+
+  if (result.status === 502 || result.status === 503 || result.status === 504) {
     return true
   }
 

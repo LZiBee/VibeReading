@@ -12,7 +12,8 @@
     "dev": "npm run dev -w @thesis-agent/desktop",
     "build": "npm run build -w @thesis-agent/desktop",
     "typecheck": "npm run typecheck -w @thesis-agent/desktop",
-    "check": "npm run typecheck && npm run build"
+    "check": "npm run typecheck && npm run build",
+    "verify:ppt": "node scripts/verify-ppt-pipeline.mjs"
   },
   "engines": {
     "node": ">=20"

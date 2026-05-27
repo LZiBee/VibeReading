@@ -30,9 +30,9 @@ export type NoteBlockType =
   | 'reference'
   | 'question_node'
 
-export type HeadingLevel = 1 | 2 | 3
+export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6
 
-export type NoteBlockListStyle = 'bullet'
+export type NoteBlockListStyle = 'bullet' | 'ordered'
 
 export type NoteBlockStyle = {
   fontFamily?: string
@@ -213,6 +213,41 @@ export type NoteTemplateDefinition = {
   description: string
   icon: string
   create: (input: NoteTemplateCreateInput) => NoteDocument
+}
+
+export type BasicMarkdownImportOptions = {
+  noteId?: EntityId
+  title?: string
+  template?: NoteTemplateKind
+  paperId?: EntityId
+  now?: string
+}
+
+export type NoteComplexBlockPlaceholder = {
+  blockId: EntityId
+  type: NoteBlockType
+  label: string
+  href: string
+  pageNo?: number
+  quote?: string
+  sourceRefsJson?: string
+  imageSrc?: string
+  imageCaption?: string
+  imageRatio?: number
+}
+
+type MilkdownComplexBlockLink = {
+  blockId: EntityId
+  type: NoteBlockType
+  label: string
+  title?: string
+  sourceRefsJson?: string
+}
+
+type MarkdownImageSection = {
+  src: string
+  alt: string
+  title?: string
 }
 
 export const noteTemplateDefinitions: NoteTemplateDefinition[] = [
@@ -607,6 +642,123 @@ export function noteToMarkdown(note: NoteDocument): string {
   return [`# ${note.title}`, ...blocks].join('\n\n')
 }
 
+export function noteToMilkdownMarkdown(note: NoteDocument): {
+  markdown: string
+  placeholders: NoteComplexBlockPlaceholder[]
+  hasComplexBlocks: boolean
+} {
+  const placeholders: NoteComplexBlockPlaceholder[] = []
+  const blocks = note.blocks
+    .map((block) => {
+      if (isBasicRoundtripBlockType(block.type) && !hasPdfSourceRef(block)) {
+        return noteBlockContentToMilkdownMarkdown(block.type, block.content, block.style)
+      }
+
+      const placeholder = createComplexBlockPlaceholder(block)
+      placeholders.push(placeholder)
+      if (placeholder.type === 'formula') {
+        return `[${escapeMarkdownLinkText(placeholder.label)}](${placeholder.href})`
+      }
+      if (placeholder.type === 'pdf_excerpt') {
+        return `[${escapeMarkdownLinkText(placeholder.quote || placeholder.label)}](${placeholder.href})`
+      }
+      if (placeholder.type === 'ai_answer') {
+        return `[${escapeMarkdownLinkText(placeholder.quote || placeholder.label)}](${placeholder.href})`
+      }
+      return `[${placeholder.label}](${placeholder.href})`
+    })
+    .filter((line) => line.trim().length > 0)
+
+  return {
+    markdown: [`# ${note.title}`, ...blocks].join('\n\n'),
+    placeholders,
+    hasComplexBlocks: placeholders.length > 0
+  }
+}
+
+export function createBasicNoteFromMarkdown(markdown: string, options: BasicMarkdownImportOptions = {}): NoteDocument {
+  const now = options.now ?? new Date().toISOString()
+  const normalizedMarkdown = markdown.replace(/\r\n/g, '\n').trim()
+  const paragraphs = normalizedMarkdown ? normalizedMarkdown.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean) : []
+
+  let title = options.title?.trim() || '未命名笔记'
+  const bodyBlocks = [...paragraphs]
+
+  if (bodyBlocks[0]?.startsWith('# ')) {
+    title = bodyBlocks[0].slice(2).trim() || title
+    bodyBlocks.shift()
+  }
+
+  const noteId = options.noteId ?? createId('note')
+  const blocks = bodyBlocks.flatMap((block, index) => createBasicBlocksFromMarkdownSection(noteId, block, index, now))
+
+  return {
+    id: noteId,
+    title,
+    template: options.template ?? 'freeform',
+    paperId: options.paperId,
+    blocks,
+    createdAt: now,
+    updatedAt: now
+  }
+}
+
+export function createNoteFromMilkdownMarkdown(
+  markdown: string,
+  previousNote: NoteDocument,
+  options: BasicMarkdownImportOptions = {}
+): NoteDocument {
+  const now = options.now ?? new Date().toISOString()
+  const normalizedMarkdown = markdown.replace(/\r\n/g, '\n').trim()
+  const paragraphs = normalizedMarkdown ? normalizedMarkdown.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean) : []
+
+  let title = options.title?.trim() || previousNote.title || '未命名笔记'
+  const bodyBlocks = [...paragraphs]
+
+  if (/^#\s+/.test(bodyBlocks[0] ?? '')) {
+    title = bodyBlocks[0].replace(/^#\s+/, '').trim() || title
+    bodyBlocks.shift()
+  }
+
+  const noteId = options.noteId ?? previousNote.id
+  const previousBlocksById = new Map(previousNote.blocks.map((block) => [block.id, block]))
+  const previousMediaBlocks = previousNote.blocks.filter(
+    (block) =>
+      (block.type === 'image' || block.type === 'screenshot') &&
+      'src' in block.content &&
+      typeof block.content.src === 'string' &&
+      block.content.src.trim().length > 0
+  )
+  const blocks: NoteBlock[] = []
+
+  for (const section of bodyBlocks) {
+    const restoredBlock =
+      restoreMilkdownComplexBlock(section, previousBlocksById, noteId, blocks.length, now) ??
+      restoreMilkdownImageBlock(section, previousMediaBlocks, noteId, blocks.length, now)
+    const sectionBlocks = restoredBlock
+      ? [restoredBlock]
+      : createBasicBlocksFromMarkdownSection(noteId, section, blocks.length, now)
+
+    for (const block of sectionBlocks) {
+      blocks.push(normalizeImportedNoteBlock(block, noteId, blocks.length, now))
+    }
+  }
+
+  return {
+    ...previousNote,
+    id: noteId,
+    title,
+    template: options.template ?? previousNote.template,
+    paperId: options.paperId ?? previousNote.paperId,
+    blocks,
+    updatedAt: now
+  }
+}
+
+export function supportsBasicMarkdownRoundtrip(note: NoteDocument): boolean {
+  return note.blocks.every((block) => isBasicRoundtripBlockType(block.type) && block.sourceRefs.length === 0)
+}
+
 export function countNoteTextCharacters(note: NoteDocument): number {
   return note.blocks.reduce((total, block) => total + getNoteBlockText(block).trim().length, 0)
 }
@@ -644,8 +796,8 @@ export function normalizeNoteBlockStyle(input: unknown): NoteBlockStyle | undefi
     style.highlight = input.highlight
   }
 
-  if (input.listStyle === 'bullet') {
-    style.listStyle = 'bullet'
+  if (input.listStyle === 'bullet' || input.listStyle === 'ordered') {
+    style.listStyle = input.listStyle
   }
 
   return Object.keys(style).length > 0 ? style : undefined
@@ -804,14 +956,550 @@ function updateBlockContentText(type: NoteBlockType, content: NoteBlockContent, 
   }
 }
 
+function restoreMilkdownComplexBlock(
+  section: string,
+  previousBlocksById: Map<EntityId, NoteBlock>,
+  noteId: EntityId,
+  orderIndex: number,
+  now: string
+): NoteBlock | null {
+  const link = parseMilkdownComplexBlockLink(section)
+  if (!link) {
+    return null
+  }
+
+  const previousBlock = previousBlocksById.get(link.blockId)
+  if (!previousBlock) {
+    return null
+  }
+
+  const nextText = cleanMilkdownPlainText(restoreMarkdownLinkTitle(link.title) || link.label, previousBlock.type).trim()
+  const previousText = getNoteBlockText(previousBlock).trim()
+  const sourceText = readFirstSourceRefQuote(previousBlock.sourceRefs).trim()
+  const isEditedSourceText = Boolean(
+    nextText &&
+      (previousBlock.type === 'pdf_excerpt' || previousBlock.type === 'ai_answer') &&
+      nextText !== previousText &&
+      (!sourceText || nextText !== sourceText)
+  )
+  const nextBlock = nextText && nextText !== previousText
+    ? updateNoteBlockText(previousBlock, nextText, now)
+    : {
+        ...previousBlock,
+        updatedAt: now
+      }
+
+  return {
+    ...nextBlock,
+    noteId,
+    orderIndex,
+    sourceRefs: isEditedSourceText ? [] : nextBlock.sourceRefs,
+    markdown: noteBlockContentToMarkdown(nextBlock.type, nextBlock.content, nextBlock.style)
+  }
+}
+
+function restoreMilkdownImageBlock(
+  section: string,
+  previousMediaBlocks: NoteBlock[],
+  noteId: EntityId,
+  orderIndex: number,
+  now: string
+): NoteBlock | null {
+  const image = parseMarkdownImageSection(section)
+  if (!image) {
+    return null
+  }
+
+  const previousBlock = previousMediaBlocks.find(
+    (block) => 'src' in block.content && block.content.src === image.src
+  )
+  const caption = restoreMarkdownLinkTitle(image.title) || unescapeMarkdownLinkText(image.alt)
+
+  if (previousBlock && (previousBlock.type === 'image' || previousBlock.type === 'screenshot')) {
+    const content = previousBlock.content
+    const nextContent: MediaNoteBlockContent = {
+      ...('assetId' in content ? { assetId: content.assetId } : {}),
+      ...('width' in content ? { width: content.width } : {}),
+      ...('height' in content ? { height: content.height } : {}),
+      ...('displayWidth' in content ? { displayWidth: content.displayWidth } : {}),
+      ...('displayHeight' in content ? { displayHeight: content.displayHeight } : {}),
+      ...('wrapStyle' in content ? { wrapStyle: content.wrapStyle } : {}),
+      ...('crop' in content ? { crop: content.crop } : {}),
+      ...('pageNo' in content ? { pageNo: content.pageNo } : {}),
+      ...('segmentIndex' in content ? { segmentIndex: content.segmentIndex } : {}),
+      src: image.src,
+      alt: image.alt || ('alt' in content ? content.alt : undefined),
+      caption: caption || ('caption' in content ? content.caption : undefined)
+    }
+
+    return {
+      ...previousBlock,
+      noteId,
+      orderIndex,
+      content: nextContent,
+      markdown: noteBlockContentToMarkdown(previousBlock.type, nextContent, previousBlock.style),
+      updatedAt: now
+    }
+  }
+
+  return createNoteBlock({
+    noteId,
+    type: 'image',
+    orderIndex,
+    content: {
+      src: image.src,
+      alt: image.alt,
+      caption
+    },
+    now
+  })
+}
+
+function normalizeImportedNoteBlock(block: NoteBlock, noteId: EntityId, orderIndex: number, now: string): NoteBlock {
+  return {
+    ...block,
+    noteId,
+    orderIndex,
+    markdown: noteBlockContentToMarkdown(block.type, block.content, block.style),
+    updatedAt: now
+  }
+}
+
+function createBasicBlocksFromMarkdownSection(
+  noteId: EntityId,
+  section: string,
+  orderIndex: number,
+  now: string
+): NoteBlock[] {
+  if (/^#{1,6}\s+/.test(section)) {
+    const headingMatch = /^(#{1,6})\s+([\s\S]*)$/.exec(section)
+    if (headingMatch) {
+      return [
+        createNoteBlock({
+          noteId,
+          type: 'heading',
+          orderIndex,
+          content: {
+            text: headingMatch[2].trim(),
+            level: headingMatch[1].length as HeadingLevel
+          },
+          now
+        })
+      ]
+    }
+  }
+
+  const image = parseMarkdownImageSection(section)
+  if (image) {
+    return [
+      createNoteBlock({
+        noteId,
+        type: 'image',
+        orderIndex,
+        content: {
+          src: image.src,
+          alt: unescapeMarkdownLinkText(image.alt),
+          caption: restoreMarkdownLinkTitle(image.title) || unescapeMarkdownLinkText(image.alt)
+        },
+        now
+      })
+    ]
+  }
+
+  if (/^- \[[ xX]\]\s+/.test(section)) {
+    const todoLines = section.split('\n').map((line) => line.trim()).filter(Boolean)
+    return todoLines.map((line, lineIndex) => {
+      const todoMatch = /^- \[([ xX])\]\s+([\s\S]*)$/.exec(line)
+      return createNoteBlock({
+        noteId,
+        type: 'todo',
+        orderIndex: orderIndex + lineIndex,
+        content: {
+          text: todoMatch?.[2]?.trim() ?? line,
+          checked: (todoMatch?.[1] ?? '').toLowerCase() === 'x'
+        },
+        now
+      })
+    })
+  }
+
+  const bulletLines = section.split('\n').map((line) => line.trim()).filter(Boolean)
+  if (bulletLines.length > 0 && bulletLines.every((line) => /^[-*+]\s+/.test(line))) {
+    return [
+      createNoteBlock({
+        noteId,
+        type: 'paragraph',
+        orderIndex,
+        content: {
+          text: bulletLines.map((line) => line.replace(/^[-*+]\s+/, '').trim()).join('\n')
+        },
+        style: {
+          listStyle: 'bullet'
+        },
+        now
+      })
+    ]
+  }
+
+  if (bulletLines.length > 0 && bulletLines.every((line) => /^\d+[.)]\s+/.test(line))) {
+    return [
+      createNoteBlock({
+        noteId,
+        type: 'paragraph',
+        orderIndex,
+        content: {
+          text: bulletLines.map((line) => line.replace(/^\d+[.)]\s+/, '').trim()).join('\n')
+        },
+        style: {
+          listStyle: 'ordered'
+        },
+        now
+      })
+    ]
+  }
+
+  if (/^>\s?/.test(section)) {
+    return [
+      createNoteBlock({
+        noteId,
+        type: 'quote',
+        orderIndex,
+        content: {
+          text: section
+            .split('\n')
+            .map((line) => line.replace(/^>\s?/, ''))
+            .join('\n')
+            .trim()
+        },
+        now
+      })
+    ]
+  }
+
+  if (/^\$\$[\s\S]*\$\$$/.test(section)) {
+    const latex = section.replace(/^\$\$\n?/, '').replace(/\n?\$\$$/, '').trim()
+    return [
+      createNoteBlock({
+        noteId,
+        type: 'formula',
+        orderIndex,
+        content: {
+          latex
+        },
+        now
+      })
+    ]
+  }
+
+  const tableLines = section.split('\n').map((line) => line.trim())
+  if (tableLines.length >= 2 && tableLines.every((line) => line.startsWith('|') && line.endsWith('|'))) {
+    const rows = tableLines
+      .filter((line, lineIndex) => !(lineIndex === 1 && /^(\|\s*:?-+:?\s*)+\|$/.test(line)))
+      .map((line) => splitMarkdownTableRow(line.slice(1, -1)))
+
+    return [
+      createNoteBlock({
+        noteId,
+        type: 'table',
+        orderIndex,
+        content: {
+          rows
+        },
+        now
+      })
+    ]
+  }
+
+  return [
+    createNoteBlock({
+      noteId,
+      type: 'paragraph',
+      orderIndex,
+      content: {
+        text: section
+      },
+      now
+    })
+  ]
+}
+
+function createComplexBlockPlaceholder(block: NoteBlock): NoteComplexBlockPlaceholder {
+  const sourceRef = block.sourceRefs.find((currentSourceRef) => currentSourceRef.type === 'note_block')
+  const blockText = getNoteBlockText(block).trim()
+  const isMediaBlock = block.type === 'image' || block.type === 'screenshot'
+  const placeholderType: NoteBlockType =
+    sourceRef && block.type !== 'formula' && !isMediaBlock
+      ? looksLikeStandaloneLatexText(sourceRef.quote ?? blockText)
+        ? 'formula'
+        : 'pdf_excerpt'
+      : block.type
+  const mediaContent = isMediaBlock ? block.content : undefined
+  const imageSrc =
+    mediaContent && 'src' in mediaContent && typeof mediaContent.src === 'string' && mediaContent.src.trim()
+      ? mediaContent.src
+      : undefined
+  const imageCaption =
+    mediaContent && 'caption' in mediaContent && typeof mediaContent.caption === 'string'
+      ? mediaContent.caption
+      : undefined
+  const imageRatio =
+    mediaContent &&
+    'displayHeight' in mediaContent &&
+    'displayWidth' in mediaContent &&
+    typeof mediaContent.displayHeight === 'number' &&
+    typeof mediaContent.displayWidth === 'number' &&
+    mediaContent.displayWidth > 0
+      ? mediaContent.displayHeight / mediaContent.displayWidth
+      : undefined
+  return {
+    blockId: block.id,
+    type: placeholderType,
+    label: getComplexBlockPlaceholderLabel(block, placeholderType),
+    href: createNoteBlockSourceLinkHref(block.id, placeholderType, sourceRef?.pageNo, block.sourceRefs),
+    pageNo: sourceRef?.pageNo,
+    quote: sourceRef?.quote ?? blockText,
+    sourceRefsJson: JSON.stringify(block.sourceRefs),
+    imageSrc,
+    imageCaption,
+    imageRatio
+  }
+}
+
+function looksLikeStandaloneLatexText(value: string): boolean {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+
+  if (!normalized || !/(\\{1,2}[A-Za-z]+|[_^{}=])/u.test(normalized)) {
+    return false
+  }
+
+  const proseRemainder = normalized
+    .replace(/\\{1,2}[A-Za-z]+/g, ' ')
+    .replace(/[{}_^=+\-*/(),.;:[\]\d]/g, ' ')
+  const proseWords = proseRemainder.match(/[A-Za-z]{3,}/g) ?? []
+
+  if (proseWords.length > 2) {
+    return false
+  }
+
+  const latexSignalCount = (normalized.match(/\\{1,2}[A-Za-z]+|[_^{}=+\-*/]/g) ?? []).length
+  return latexSignalCount >= 3
+}
+
+function createNoteBlockSourceLinkHref(
+  blockId: EntityId,
+  type: NoteBlockType,
+  pageNo?: number,
+  sourceRefs?: SourceRef[]
+): string {
+  const params = new URLSearchParams()
+  params.set('type', type)
+  if (typeof pageNo === 'number' && Number.isFinite(pageNo)) {
+    params.set('page', String(pageNo))
+  }
+  const sourceRefsJson = sourceRefs && sourceRefs.length > 0 ? JSON.stringify(sourceRefs) : ''
+  if (sourceRefsJson) {
+    params.set('refs', sourceRefsJson)
+  }
+
+  return `inspiration-note-block://${encodeURIComponent(blockId)}?${params.toString()}`
+}
+
+function parseMilkdownComplexBlockLink(section: string): MilkdownComplexBlockLink | null {
+  const parsedLink = parseMarkdownLinkSection(section)
+  if (!parsedLink || !parsedLink.href.startsWith('inspiration-note-block://')) {
+    return null
+  }
+
+  try {
+    const url = new URL(parsedLink.href)
+    const blockId = decodeURIComponent(url.hostname || '')
+    const rawType = url.searchParams.get('type') ?? ''
+
+    if (!blockId || !isNoteBlockType(rawType)) {
+      return null
+    }
+
+    return {
+      blockId,
+      type: rawType,
+      label: unescapeMarkdownLinkText(parsedLink.label),
+      title: parsedLink.title,
+      sourceRefsJson: url.searchParams.get('refs') ?? undefined
+    }
+  } catch {
+    return null
+  }
+}
+
+function parseMarkdownLinkSection(section: string): { label: string; href: string; title?: string } | null {
+  const trimmed = section.trim()
+  const labelEnd = findClosingMarkdownBracket(trimmed, 0)
+
+  if (!trimmed.startsWith('[') || labelEnd <= 0 || trimmed[labelEnd + 1] !== '(' || !trimmed.endsWith(')')) {
+    return null
+  }
+
+  const destination = parseMarkdownDestinationAndTitle(trimmed.slice(labelEnd + 2, -1))
+  if (!destination) {
+    return null
+  }
+
+  return {
+    label: trimmed.slice(1, labelEnd),
+    href: destination.href,
+    title: destination.title
+  }
+}
+
+function parseMarkdownImageSection(section: string): MarkdownImageSection | null {
+  const trimmed = section.trim()
+
+  if (!trimmed.startsWith('![') || !trimmed.endsWith(')')) {
+    return null
+  }
+
+  const labelEnd = findClosingMarkdownBracket(trimmed, 1)
+  if (labelEnd <= 1 || trimmed[labelEnd + 1] !== '(') {
+    return null
+  }
+
+  const destination = parseMarkdownDestinationAndTitle(trimmed.slice(labelEnd + 2, -1))
+  if (!destination?.href) {
+    return null
+  }
+
+  return {
+    src: destination.href,
+    alt: unescapeMarkdownLinkText(trimmed.slice(2, labelEnd)),
+    title: destination.title
+  }
+}
+
+function parseMarkdownDestinationAndTitle(value: string): { href: string; title?: string } | null {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const titleMatch = /^(<[^>]+>|\S+)(?:\s+(?:"([^"]*)"|'([^']*)'|\(([^)]*)\)))?$/.exec(trimmed)
+  if (!titleMatch) {
+    return {
+      href: trimmed
+    }
+  }
+
+  const rawHref = titleMatch[1]
+  const href = rawHref.startsWith('<') && rawHref.endsWith('>') ? rawHref.slice(1, -1) : rawHref
+  const title = titleMatch[2] ?? titleMatch[3] ?? titleMatch[4]
+
+  return {
+    href,
+    title
+  }
+}
+
+function findClosingMarkdownBracket(value: string, openIndex: number): number {
+  for (let index = openIndex + 1; index < value.length; index += 1) {
+    if (value[index] === ']' && value[index - 1] !== '\\') {
+      return index
+    }
+  }
+
+  return -1
+}
+
+function isNoteBlockType(value: string): value is NoteBlockType {
+  return noteBlockTypes.includes(value as NoteBlockType)
+}
+
+function escapeMarkdownLinkText(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function unescapeMarkdownLinkText(value: string): string {
+  return value
+    .replace(/\\\[/g, '[')
+    .replace(/\\\]/g, ']')
+    .replace(/\\\\/g, '\\')
+    .trim()
+}
+
+function restoreMarkdownLinkTitle(value: string | undefined): string {
+  return value ? value.replace(/\\n/g, '\n').replace(/&quot;/g, '"') : ''
+}
+
+function readFirstSourceRefQuote(sourceRefs: SourceRef[]): string {
+  return sourceRefs
+    .map((sourceRef) => (typeof sourceRef.quote === 'string' ? sourceRef.quote.trim() : ''))
+    .find((quote) => quote.length > 0) ?? ''
+}
+
+function hasPdfSourceRef(block: NoteBlock): boolean {
+  return block.sourceRefs.some((sourceRef) => sourceRef.type === 'note_block')
+}
+
+function getComplexBlockPlaceholderLabel(block: NoteBlock, displayType: NoteBlockType = block.type): string {
+  const text = getNoteBlockText(block).trim()
+  if (displayType === 'pdf_excerpt') {
+    return text ? `PDF 摘录：${text.slice(0, 80)}` : 'PDF 摘录'
+  }
+
+  if (displayType === 'ai_answer') {
+    return text ? `AI 回答：${text.slice(0, 80)}` : 'AI 回答'
+  }
+
+  if (displayType === 'formula') {
+    const pageNo = block.sourceRefs.find((sourceRef) => typeof sourceRef.pageNo === 'number')?.pageNo
+    return typeof pageNo === 'number' ? `公式 · 第 ${pageNo} 页` : '公式'
+  }
+
+  if (displayType === 'image') {
+    return text ? `图片：${text.slice(0, 80)}` : '图片'
+  }
+
+  if (displayType === 'screenshot') {
+    return text ? `截图：${text.slice(0, 80)}` : '截图'
+  }
+
+  if (displayType === 'reference') {
+    return text ? `参考文献：${text.slice(0, 80)}` : '参考文献'
+  }
+
+  if (displayType === 'question_node') {
+    return text ? `问题节点：${text.slice(0, 80)}` : '问题节点'
+  }
+
+  return text ? `${displayType}：${text.slice(0, 80)}` : displayType
+}
+
+function isBasicRoundtripBlockType(type: NoteBlockType): boolean {
+  return (
+    type === 'paragraph' ||
+    type === 'heading' ||
+    type === 'quote' ||
+    type === 'todo' ||
+    type === 'formula' ||
+    type === 'table'
+  )
+}
+
 function noteBlockContentToMarkdown(type: NoteBlockType, content: NoteBlockContent, style?: NoteBlockStyle): string {
   const text = getContentText(content)
 
-  if (canUseBulletListStyle(type) && style?.listStyle === 'bullet' && text.trim()) {
+  if (canUseBulletListStyle(type) && style?.listStyle && text.trim()) {
     return text
       .split('\n')
       .filter((line) => line.trim().length > 0)
-      .map((line) => `- ${formatInlineMarkdown(line, style)}`)
+      .map((line, index) =>
+        style.listStyle === 'ordered'
+          ? `${index + 1}. ${formatInlineMarkdown(line, style)}`
+          : `- ${formatInlineMarkdown(line, style)}`
+      )
       .join('\n')
   }
 
@@ -837,7 +1525,7 @@ function noteBlockContentToMarkdown(type: NoteBlockType, content: NoteBlockConte
   }
 
   if (type === 'table' && 'rows' in content) {
-    return content.rows.map((row) => `| ${row.join(' | ')} |`).join('\n')
+    return renderMarkdownTable(content.rows)
   }
 
   if ((type === 'image' || type === 'screenshot') && 'caption' in content) {
@@ -849,6 +1537,125 @@ function noteBlockContentToMarkdown(type: NoteBlockType, content: NoteBlockConte
   }
 
   return formatInlineMarkdown(text, style)
+}
+
+function noteBlockContentToMilkdownMarkdown(type: NoteBlockType, content: NoteBlockContent, style?: NoteBlockStyle): string {
+  const text = cleanMilkdownPlainText(getContentText(content), type)
+
+  return noteBlockContentToMarkdown(type, { ...content, text } as NoteBlockContent, stripHtmlOnlyStyle(style))
+}
+
+function renderMarkdownTable(rows: string[][]): string {
+  const normalizedRows = rows.map((row) => row.map((cell) => normalizeMarkdownTableCell(cell)))
+  const columnCount = Math.max(1, ...normalizedRows.map((row) => row.length))
+  const headerRow = padMarkdownTableRow(normalizedRows[0] ?? [], columnCount)
+  const separatorRow = Array.from({ length: columnCount }, () => '---').join(' | ')
+  const bodyRows = normalizedRows.slice(1).map((row) => `| ${padMarkdownTableRow(row, columnCount).join(' | ')} |`)
+
+  return [`| ${headerRow.join(' | ')} |`, `| ${separatorRow} |`, ...bodyRows].join('\n')
+}
+
+function padMarkdownTableRow(row: string[], columnCount: number): string[] {
+  const nextRow = row.slice(0, columnCount)
+
+  while (nextRow.length < columnCount) {
+    nextRow.push('')
+  }
+
+  return nextRow
+}
+
+function normalizeMarkdownTableCell(value: string): string {
+  return value
+    .replace(/\r?\n/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+}
+
+function splitMarkdownTableRow(value: string): string[] {
+  const cells: string[] = []
+  let current = ''
+
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]
+    const nextChar = value[index + 1]
+
+    if (char === '\\' && (nextChar === '\\' || nextChar === '|')) {
+      current += nextChar
+      index += 1
+      continue
+    }
+
+    if (char === '|') {
+      cells.push(decodeMarkdownTableCell(current.trim()))
+      current = ''
+      continue
+    }
+
+    current += char
+  }
+
+  cells.push(decodeMarkdownTableCell(current.trim()))
+  return cells
+}
+
+function decodeMarkdownTableCell(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
+function cleanMilkdownPlainText(value: string, type: NoteBlockType): string {
+  const withoutHtml = stripSimpleInlineHtml(stripMarkdownEmphasisFences(value))
+
+  return type === 'formula' ? withoutHtml : unescapeMarkdownProseArtifacts(withoutHtml)
+}
+
+function stripMarkdownEmphasisFences(value: string): string {
+  let next = value
+
+  for (let index = 0; index < 4; index += 1) {
+    const stripped = next.replace(
+      /(^|[\s([{"'“‘>])(\*{2,})(?=\S)([\s\S]*?\S)\2(?=$|[\s)\].,;:!?"'”’])/g,
+      '$1$3'
+    )
+
+    if (stripped === next) {
+      break
+    }
+
+    next = stripped
+  }
+
+  return next
+    .replace(/(^|[\s([{"'“‘>])\*{2,}(?=\S)/g, '$1')
+    .replace(/(?<=\S)\*{2,}(?=$|[\s)\].,;:!?"'”’])/g, '')
+}
+
+function stripHtmlOnlyStyle(style: NoteBlockStyle | undefined): NoteBlockStyle | undefined {
+  if (!style?.fontFamily && !style?.fontSize) {
+    return style
+  }
+
+  const { fontFamily: _fontFamily, fontSize: _fontSize, ...rest } = style
+
+  return Object.keys(rest).length > 0 ? rest : undefined
+}
+
+function stripSimpleInlineHtml(value: string): string {
+  return value
+    .replace(/\\?<br\s*\/?\\?>/gi, '\n')
+    .replace(/\\?<\/?(?:span|u|mark)\b[^>]*\\?>/gi, '')
+}
+
+function unescapeMarkdownProseArtifacts(value: string): string {
+  return value.replace(/\\(?=[<>\[\]])/g, '')
 }
 
 function getContentText(content: NoteBlockContent): string {
@@ -879,14 +1686,15 @@ function noteBlockToHtml(block: NoteBlock): string {
   const text = getNoteBlockText(block)
   const style = blockStyleToCss(block.style)
 
-  if (canUseBulletListStyle(block.type) && block.style?.listStyle === 'bullet' && text.trim()) {
+  if (canUseBulletListStyle(block.type) && block.style?.listStyle && text.trim()) {
     const items = text
       .split('\n')
       .filter((line) => line.trim().length > 0)
       .map((line) => `<li style="${escapeAttribute(style)}">${escapeHtml(line)}</li>`)
       .join('')
+    const tag = block.style.listStyle === 'ordered' ? 'ol' : 'ul'
 
-    return `<ul>${items}</ul>`
+    return `<${tag}>${items}</${tag}>`
   }
 
   if (block.type === 'heading') {
@@ -909,10 +1717,12 @@ function noteBlockToHtml(block: NoteBlock): string {
   }
 
   if (block.type === 'table' && 'rows' in block.content) {
-    const rows = block.content.rows
+    const [headerRow = [], ...bodyRows] = block.content.rows
+    const header = `<tr>${headerRow.map((cell) => `<th scope="col" style="${escapeAttribute(style)}">${textToHtml(cell)}</th>`).join('')}</tr>`
+    const body = bodyRows
       .map((row) => `<tr>${row.map((cell) => `<td style="${escapeAttribute(style)}">${textToHtml(cell)}</td>`).join('')}</tr>`)
       .join('')
-    return `<table>${rows}</table>`
+    return `<table>${header}${body}</table>`
   }
 
   if ((block.type === 'image' || block.type === 'screenshot') && 'caption' in block.content) {

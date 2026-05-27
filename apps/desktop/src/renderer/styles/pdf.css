@@ -54,6 +54,17 @@
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.72);
 }
 
+.toolbar .pdf-ppt-tool-button {
+  flex-basis: 42px;
+}
+
+.pdf-ppt-label {
+  color: currentColor;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
 .pdf-floating-panel {
   position: absolute;
   z-index: 10;
@@ -113,16 +124,66 @@
   color: var(--text-primary);
 }
 
+.ppt-config-panel {
+  left: 108px;
+  width: min(360px, calc(100vw - 40px));
+}
+
+.ppt-config-panel label {
+  display: grid;
+  gap: 4px;
+}
+
+.ppt-config-panel label > span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.ppt-config-panel input,
+.ppt-config-panel select {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid #d6dde2;
+  border-radius: 6px;
+  background: #fff;
+  color: var(--text-primary);
+}
+
+.ppt-config-panel input[type="range"] {
+  height: 22px;
+  padding: 0;
+}
+
+.ppt-config-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
 .mineru-config-panel .checkbox-row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.mineru-config-panel .checkbox-row input {
+.mineru-config-panel .checkbox-row input,
+.ppt-config-panel .checkbox-row input {
   width: 16px;
   height: 16px;
   padding: 0;
+}
+
+.ppt-config-panel .checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ppt-config-panel .checkbox-row span {
+  color: var(--text-primary);
+  font-size: 12px;
 }
 
 .mineru-menu-panel {
@@ -1288,6 +1349,123 @@ button.pdf-bitmap-page,
 .annotation-preview-title button:hover,
 .annotation-note-actions button:hover {
   background: var(--selection-bg);
+}
+
+.selection-explain-card {
+  display: grid;
+  gap: 8px;
+  width: min(320px, calc(100vw - 48px));
+  padding: 9px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  color: var(--text-primary);
+  background: #f8fafc;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.selection-explain-card.loading,
+.selection-explain-card.error {
+  grid-auto-flow: column;
+  justify-content: start;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.selection-explain-card.error {
+  display: grid;
+  grid-auto-flow: row;
+  border-color: rgba(220, 38, 38, 0.24);
+  background: #fff7f7;
+}
+
+.selection-explain-card.dictionary {
+  border-color: rgba(20, 184, 166, 0.28);
+}
+
+.selection-explain-card.translation,
+.selection-explain-card.fallback {
+  border-color: rgba(59, 130, 246, 0.24);
+}
+
+.selection-explain-card-title,
+.selection-explain-headword,
+.selection-explain-card-actions,
+.selection-explain-phrases div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-explain-card-title {
+  justify-content: space-between;
+  color: var(--text-secondary);
+  font-weight: 650;
+}
+
+.selection-explain-card-actions {
+  gap: 4px;
+}
+
+.selection-explain-card-actions button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+}
+
+.selection-explain-card-actions button:hover {
+  background: #ffffff;
+}
+
+.selection-explain-cache,
+.selection-explain-pos {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.selection-explain-headword strong {
+  font-size: 14px;
+}
+
+.selection-explain-headword span {
+  color: var(--text-secondary);
+}
+
+.selection-explain-dictionary,
+.selection-explain-translation {
+  display: grid;
+  gap: 7px;
+}
+
+.selection-explain-dictionary p,
+.selection-explain-translation p,
+.selection-explain-fallback,
+.selection-explain-card.error p {
+  margin: 0;
+}
+
+.selection-explain-phrases {
+  display: grid;
+  gap: 5px;
+  padding-top: 2px;
+}
+
+.selection-explain-phrases div {
+  justify-content: space-between;
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: #ffffff;
+}
+
+.selection-explain-phrases span {
+  color: var(--text-secondary);
+}
+
+.selection-explain-fallback {
+  color: var(--text-secondary);
 }
 
 .annotation-note-editor {

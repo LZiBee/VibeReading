@@ -6,7 +6,8 @@ import type { NoteBlock, NoteBlockContent, NoteBlockType, NoteDocument, NoteTemp
 import { normalizeMineruParseResultSegments, type MineruModelVersion, type MineruParseResult, type SourceRef, type SourceRefType } from '@thesis-agent/shared'
 
 export type PrimaryView = 'library' | 'favorites' | 'note' | 'graph'
-export type EditorTab = 'pdf' | 'profile'
+export type EditorTab = 'pdf' | 'graph' | 'mindmap' | 'profile'
+export type NoteEditorEngine = 'legacy' | 'milkdown'
 export type DockPanelId = 'library' | 'editor' | 'note' | 'ai'
 export type ClosableDockPanelId = Exclude<DockPanelId, 'library'>
 export type WorkbenchLayoutDirection = 'horizontal' | 'vertical'
@@ -56,6 +57,37 @@ export type MineruSettingsState = {
     italic: boolean
     highlight: string
   }
+}
+
+export type TranslationSettingsState = {
+  targetLanguage: string
+  dictionaryEnabled: boolean
+  fullTextBatchSize: number
+  ai: AiSettingsState
+}
+
+export type PptGenerationSettingsState = {
+  targetSlideCount: number
+  includeAgenda: boolean
+  includeReferences: boolean
+  includeAppendix: boolean
+  includeNotes: boolean
+  includeAiAnswers: boolean
+}
+
+export type PdfEditorSettingsState = {
+  defaultTool: 'select' | 'highlight'
+  defaultBrowseMode: 'scroll' | 'page'
+  defaultRenderMode: 'compatibility' | 'pdfjs'
+  defaultScale: number
+  showSelectionPopover: boolean
+}
+
+export type AppSettingsState = {
+  translation: TranslationSettingsState
+  pptAi: AiSettingsState
+  pptGeneration: PptGenerationSettingsState
+  pdfEditor: PdfEditorSettingsState
 }
 
 export type ChatMessageState = {
@@ -140,6 +172,7 @@ export type LibraryStructureState = {
 export type WorkbenchState = {
   activeView: PrimaryView
   activeEditor: EditorTab
+  noteEditorEngine?: NoteEditorEngine
   libraryPdfPaths: string[]
   openPdfPaths: string[]
   selectedPdfPath: string
@@ -196,6 +229,7 @@ export type PersistedAppState = {
   updatedAt: string
   workbench?: WorkbenchState
   aiSettings?: AiSettingsState
+  appSettings?: AppSettingsState
   mineruSettings?: MineruSettingsState
   mineruResultsByPaperPath?: Record<string, MineruParseResult>
   hiddenMineruOverlayByPaperPath?: Record<string, boolean>
@@ -238,6 +272,40 @@ export const defaultMineruSettings: MineruSettingsState = {
   }
 }
 
+export const defaultTranslationSettings: TranslationSettingsState = {
+  targetLanguage: 'zh-CN',
+  dictionaryEnabled: true,
+  fullTextBatchSize: 5,
+  ai: {
+    ...defaultAiSettings,
+    model: 'gpt-5.4',
+    reasoningEffort: 'low'
+  }
+}
+
+export const defaultPptAiSettings: AiSettingsState = {
+  ...defaultAiSettings,
+  model: 'gpt-5.5',
+  reasoningEffort: 'xhigh'
+}
+
+export const defaultPptGenerationSettings: PptGenerationSettingsState = {
+  targetSlideCount: 10,
+  includeAgenda: true,
+  includeReferences: true,
+  includeAppendix: false,
+  includeNotes: true,
+  includeAiAnswers: true
+}
+
+export const defaultPdfEditorSettings: PdfEditorSettingsState = {
+  defaultTool: 'select',
+  defaultBrowseMode: 'page',
+  defaultRenderMode: 'compatibility',
+  defaultScale: 1,
+  showSelectionPopover: true
+}
+
 export const defaultLibrarySortState: LibrarySortState = {
   field: 'recent',
   direction: 'desc'
@@ -253,6 +321,8 @@ export const defaultDockLayout: DockSplitNode = {
   direction: 'horizontal',
   children: ['library', 'editor', 'note', 'ai']
 }
+
+export const defaultNoteEditorEngine: NoteEditorEngine = 'milkdown'
 
 const allDockPanelIds: DockPanelId[] = ['library', 'editor', 'note', 'ai']
 const noteBlockTypeValues: NoteBlockType[] = [
@@ -436,6 +506,7 @@ function sanitizePersistedAppState(input: unknown): PersistedAppState {
   const data = isRecord(input) ? input : {}
   const workbench = sanitizeWorkbenchState(data.workbench)
   const aiSettings = sanitizeAiSettingsState(data.aiSettings)
+  const appSettings = sanitizeAppSettingsState(data.appSettings, aiSettings ?? defaultAiSettings)
   const mineruSettings = sanitizeMineruSettingsState(data.mineruSettings)
   const mineruResultsByPaperPath = sanitizeMineruResultsByPaperPath(data.mineruResultsByPaperPath)
   const hiddenMineruOverlayByPaperPath = sanitizeHiddenMineruOverlayByPaperPath(
@@ -454,6 +525,7 @@ function sanitizePersistedAppState(input: unknown): PersistedAppState {
     updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : new Date().toISOString(),
     ...(workbench ? { workbench } : {}),
     ...(aiSettings ? { aiSettings } : {}),
+    ...(appSettings ? { appSettings } : {}),
     ...(mineruSettings ? { mineruSettings } : {}),
     ...(Object.keys(mineruResultsByPaperPath).length > 0 ? { mineruResultsByPaperPath } : {}),
     ...(Object.keys(hiddenMineruOverlayByPaperPath).length > 0 ? { hiddenMineruOverlayByPaperPath } : {}),
@@ -484,6 +556,7 @@ function sanitizeWorkbenchState(input: unknown): WorkbenchState | undefined {
   return {
     activeView: isPrimaryView(input.activeView) ? input.activeView : 'library',
     activeEditor: isEditorTab(input.activeEditor) ? input.activeEditor : 'pdf',
+    noteEditorEngine: isNoteEditorEngine(input.noteEditorEngine) ? input.noteEditorEngine : defaultNoteEditorEngine,
     libraryPdfPaths,
     openPdfPaths,
     selectedPdfPath,
@@ -611,23 +684,94 @@ function sanitizePdfDisplayNamesByPath(input: unknown, openPdfPaths: string[]): 
 }
 
 function sanitizeAiSettingsState(input: unknown): AiSettingsState | undefined {
+  return sanitizeAiSettingsStateWithFallback(input, defaultAiSettings)
+}
+
+function sanitizeAiSettingsStateWithFallback(input: unknown, fallback: AiSettingsState): AiSettingsState | undefined {
   if (!isRecord(input)) {
     return undefined
   }
 
   return {
-    providerId: readNonEmptyString(input.providerId, defaultAiSettings.providerId),
-    baseUrl: readNonEmptyString(input.baseUrl, defaultAiSettings.baseUrl),
-    model: readNonEmptyString(input.model, defaultAiSettings.model),
-    reasoningEffort: isReasoningEffort(input.reasoningEffort) ? input.reasoningEffort : defaultAiSettings.reasoningEffort,
+    providerId: readNonEmptyString(input.providerId, fallback.providerId),
+    baseUrl: readNonEmptyString(input.baseUrl, fallback.baseUrl),
+    model: readNonEmptyString(input.model, fallback.model),
+    reasoningEffort: isReasoningEffort(input.reasoningEffort) ? input.reasoningEffort : fallback.reasoningEffort,
     disableResponseStorage:
       typeof input.disableResponseStorage === 'boolean'
         ? input.disableResponseStorage
-        : defaultAiSettings.disableResponseStorage,
+        : fallback.disableResponseStorage,
     requiresOpenAiAuth:
-      typeof input.requiresOpenAiAuth === 'boolean' ? input.requiresOpenAiAuth : defaultAiSettings.requiresOpenAiAuth,
-    systemPrompt: readNonEmptyString(input.systemPrompt, defaultAiSettings.systemPrompt),
-    apiKey: readNonEmptyString(input.apiKey, defaultAiSettings.apiKey)
+      typeof input.requiresOpenAiAuth === 'boolean' ? input.requiresOpenAiAuth : fallback.requiresOpenAiAuth,
+    systemPrompt: readNonEmptyString(input.systemPrompt, fallback.systemPrompt),
+    apiKey: typeof input.apiKey === 'string' ? input.apiKey.trim() : fallback.apiKey
+  }
+}
+
+function sanitizeAppSettingsState(input: unknown, fallbackAiSettings: AiSettingsState): AppSettingsState | undefined {
+  if (!isRecord(input)) {
+    return undefined
+  }
+
+  const translationFallback: TranslationSettingsState = {
+    ...defaultTranslationSettings,
+    ai: {
+      ...fallbackAiSettings,
+      model: defaultTranslationSettings.ai.model,
+      reasoningEffort: defaultTranslationSettings.ai.reasoningEffort,
+      apiKey: defaultTranslationSettings.ai.apiKey
+    }
+  }
+  const pptAiFallback: AiSettingsState = {
+    ...fallbackAiSettings,
+    model: defaultPptAiSettings.model,
+    reasoningEffort: defaultPptAiSettings.reasoningEffort,
+    apiKey: defaultPptAiSettings.apiKey
+  }
+
+  return {
+    translation: sanitizeTranslationSettingsState(input.translation, translationFallback),
+    pptAi: sanitizeAiSettingsStateWithFallback(input.pptAi, pptAiFallback) ?? pptAiFallback,
+    pptGeneration: sanitizePptGenerationSettingsState(input.pptGeneration),
+    pdfEditor: sanitizePdfEditorSettingsState(input.pdfEditor)
+  }
+}
+
+function sanitizeTranslationSettingsState(input: unknown, fallback: TranslationSettingsState): TranslationSettingsState {
+  const data = isRecord(input) ? input : {}
+
+  return {
+    targetLanguage: readLimitedString(data.targetLanguage, 40, fallback.targetLanguage),
+    dictionaryEnabled: typeof data.dictionaryEnabled === 'boolean' ? data.dictionaryEnabled : fallback.dictionaryEnabled,
+    fullTextBatchSize: clampInteger(data.fullTextBatchSize, 1, 10, fallback.fullTextBatchSize),
+    ai: sanitizeAiSettingsStateWithFallback(data.ai, fallback.ai) ?? fallback.ai
+  }
+}
+
+function sanitizePptGenerationSettingsState(input: unknown): PptGenerationSettingsState {
+  const data = isRecord(input) ? input : {}
+
+  return {
+    targetSlideCount: clampInteger(data.targetSlideCount, 8, 12, defaultPptGenerationSettings.targetSlideCount),
+    includeAgenda: typeof data.includeAgenda === 'boolean' ? data.includeAgenda : defaultPptGenerationSettings.includeAgenda,
+    includeReferences:
+      typeof data.includeReferences === 'boolean' ? data.includeReferences : defaultPptGenerationSettings.includeReferences,
+    includeAppendix: typeof data.includeAppendix === 'boolean' ? data.includeAppendix : defaultPptGenerationSettings.includeAppendix,
+    includeNotes: typeof data.includeNotes === 'boolean' ? data.includeNotes : defaultPptGenerationSettings.includeNotes,
+    includeAiAnswers: typeof data.includeAiAnswers === 'boolean' ? data.includeAiAnswers : defaultPptGenerationSettings.includeAiAnswers
+  }
+}
+
+function sanitizePdfEditorSettingsState(input: unknown): PdfEditorSettingsState {
+  const data = isRecord(input) ? input : {}
+
+  return {
+    defaultTool: data.defaultTool === 'highlight' ? 'highlight' : defaultPdfEditorSettings.defaultTool,
+    defaultBrowseMode: data.defaultBrowseMode === 'scroll' ? 'scroll' : defaultPdfEditorSettings.defaultBrowseMode,
+    defaultRenderMode: data.defaultRenderMode === 'pdfjs' ? 'pdfjs' : defaultPdfEditorSettings.defaultRenderMode,
+    defaultScale: clampNumber(data.defaultScale, 0.5, 3, defaultPdfEditorSettings.defaultScale),
+    showSelectionPopover:
+      typeof data.showSelectionPopover === 'boolean' ? data.showSelectionPopover : defaultPdfEditorSettings.showSelectionPopover
   }
 }
 
@@ -719,7 +863,7 @@ function sanitizeMineruParseBlock(input: unknown): MineruParseResult['blocks'][n
     tableRows: Array.isArray(input.tableRows)
       ? input.tableRows
           .filter(Array.isArray)
-          .map((row) => row.map((cell) => readLimitedString(cell, 2000, '')).slice(0, 20))
+          .map((row) => row.map((cell) => readLimitedString(cell, 8000, '')).slice(0, 20))
           .slice(0, 200)
       : undefined,
     caption: readOptionalLimitedString(input.caption, 8000),
@@ -1318,7 +1462,7 @@ function sanitizeNoteBlockContent(type: NoteBlockType, input: unknown): NoteBloc
     const rows = Array.isArray(data.rows)
       ? data.rows
           .filter(Array.isArray)
-          .map((row) => row.map((cell) => readLimitedString(cell, 2000, '')).slice(0, 20))
+          .map((row) => row.map((cell) => readLimitedString(cell, 8000, '')).slice(0, 20))
           .slice(0, 80)
       : [['', '']]
 
@@ -1566,7 +1710,11 @@ function isPrimaryView(input: unknown): input is PrimaryView {
 }
 
 function isEditorTab(input: unknown): input is EditorTab {
-  return input === 'pdf' || input === 'profile'
+  return input === 'pdf' || input === 'graph' || input === 'mindmap' || input === 'profile'
+}
+
+function isNoteEditorEngine(input: unknown): input is NoteEditorEngine {
+  return input === 'legacy' || input === 'milkdown'
 }
 
 function isLibrarySortField(input: unknown): input is LibrarySortField {

@@ -38,6 +38,7 @@ import {
   countNoteTextCharacters,
   getMediaBlockAlt,
   getMediaBlockSrc,
+  getNoteListMarker,
   getNoteBlockEditorStyle,
   getNoteBlockLabel,
   getNoteHistoryKey,
@@ -158,6 +159,7 @@ export function NotePanelContent({
   onSourceJump,
   onMarkdownCopy,
   onExportNote,
+  onSwitchToMilkdown,
   onImagePaste,
   onNoteRestore,
   onMineruBlockDrop,
@@ -194,6 +196,7 @@ export function NotePanelContent({
   onBlockMove?: (filePath: string, noteId: string, blockId: string, insertAfterBlockId?: string | null) => void
   onMarkdownCopy: (filePath: string, noteId: string) => void
   onExportNote: (filePath: string, noteId: string, format: NoteExportFormat) => void
+  onSwitchToMilkdown?: () => void
   onImagePaste: (
     filePath: string,
     noteId: string,
@@ -962,6 +965,18 @@ export function NotePanelContent({
                     <span className="codicon codicon-file-pdf" aria-hidden="true" />
                     <span>PDF</span>
                   </button>
+                  {onSwitchToMilkdown ? (
+                    <button
+                      className="note-toolbar-button"
+                      type="button"
+                      title="切到 Markdown 笔记编辑器"
+                      aria-label="切到 Markdown 笔记编辑器"
+                      onClick={onSwitchToMilkdown}
+                    >
+                      <span className="codicon codicon-markdown" aria-hidden="true" />
+                      <span>Markdown</span>
+                    </button>
+                  ) : null}
                 </div>
 
                 <div className="note-panel-toolbar-group note-format-toolbar" aria-label="笔记格式">
@@ -1239,7 +1254,7 @@ export function NotePanelContent({
   )
 }
 
-function NoteTemplateChooser({
+export function NoteTemplateChooser({
   filePath,
   isCreatingScreenshotNote,
   onTextTemplateCreate,
@@ -1403,7 +1418,8 @@ function NoteMarkdownSectionImpl({
   const text = getNoteBlockText(block)
   const [draftText, setDraftText] = useState(text)
   const resizeStateRef = useRef<NoteMediaResizeState | null>(null)
-  const isBulletList = canUseNoteBlockBulletList(block.type) && block.style?.listStyle === 'bullet'
+  const listMarker = getNoteListMarker(block)
+  const isListBlock = Boolean(listMarker)
   const hasImage = isMediaNoteBlock(block) && getMediaBlockSrc(block)
   const mediaContent = hasImage && isMediaContent(block.content) ? block.content : undefined
   const sourceRefs = block.sourceRefs.filter(
@@ -1418,7 +1434,7 @@ function NoteMarkdownSectionImpl({
   const sectionClassName = [
     'note-markdown-section',
     `note-markdown-${block.type}`,
-    isBulletList ? 'note-markdown-bullet' : '',
+    isListBlock ? 'note-markdown-bullet' : '',
     isSourceLinked ? 'note-markdown-source-linked' : '',
     selectionRange ? 'cross-block-selected' : '',
     isActive ? 'active' : ''
@@ -1729,8 +1745,8 @@ function NoteMarkdownSectionImpl({
           ariaLabel: '琛ㄦ牸鍐呭'
         })
       ) : (
-        <div className={isBulletList ? 'note-markdown-bullet-row' : undefined}>
-          {isBulletList ? <span className="note-markdown-bullet-marker" aria-hidden="true">-</span> : null}
+        <div className={isListBlock ? 'note-markdown-bullet-row' : undefined}>
+          {isListBlock ? <span className="note-markdown-bullet-marker" aria-hidden="true">{listMarker}</span> : null}
           {renderEditor({
             className: 'note-markdown-text',
             ariaLabel: `${getNoteBlockLabel(block.type, noteBlockTypeOptions)}鍐呭`

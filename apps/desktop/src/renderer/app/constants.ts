@@ -1,5 +1,12 @@
 import type { NoteBlockType } from '@thesis-agent/notes'
-import type { PersistedAiSettingsState, PersistedMineruSettingsState } from '../../preload/thesis-agent'
+import type {
+  PersistedAiSettingsState,
+  PersistedPdfEditorSettingsState,
+  PersistedPptGenerationSettingsState,
+  PersistedTranslationSettingsState,
+  PersistedMineruSettingsState,
+  PersistedNoteEditorEngine
+} from '../../preload/thesis-agent'
 import type { LibrarySortDirection, LibrarySortField, PrimaryView } from './types'
 
 export const activityItems: Array<{
@@ -81,6 +88,40 @@ export const defaultAiSettings: PersistedAiSettingsState = {
   apiKey: ''
 }
 
+export const defaultTranslationSettings: PersistedTranslationSettingsState = {
+  targetLanguage: 'zh-CN',
+  dictionaryEnabled: true,
+  fullTextBatchSize: 5,
+  ai: {
+    ...defaultAiSettings,
+    model: 'gpt-5.4',
+    reasoningEffort: 'low'
+  }
+}
+
+export const defaultPptAiSettings: PersistedAiSettingsState = {
+  ...defaultAiSettings,
+  model: 'gpt-5.5',
+  reasoningEffort: 'xhigh'
+}
+
+export const defaultPptGenerationSettings: PersistedPptGenerationSettingsState = {
+  targetSlideCount: 10,
+  includeAgenda: true,
+  includeReferences: true,
+  includeAppendix: false,
+  includeNotes: true,
+  includeAiAnswers: true
+}
+
+export const defaultPdfEditorSettings: PersistedPdfEditorSettingsState = {
+  defaultTool: 'select',
+  defaultBrowseMode: 'page',
+  defaultRenderMode: 'compatibility',
+  defaultScale: 1,
+  showSelectionPopover: true
+}
+
 export const defaultMineruSettings: PersistedMineruSettingsState = {
   apiKey: '',
   modelVersion: 'vlm',
@@ -99,6 +140,8 @@ export const defaultMineruSettings: PersistedMineruSettingsState = {
     highlight: '#dff1ff'
   }
 }
+
+export const defaultNoteEditorEngine: PersistedNoteEditorEngine = 'milkdown'
 
 export const modelOptions = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex', 'gpt-5.2']
 export const aiComposerMinHeight = 164

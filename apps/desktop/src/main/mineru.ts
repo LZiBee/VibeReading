@@ -379,7 +379,7 @@ function normalizeMineruBlocks(
     const rect = normalizeRect(item.bbox, pageSize.width, pageSize.height)
     const segments = findMineruBlockSegments(item, rect, modelTextItems)
     const blockId = `mineru_${pageNo}_${index}_${rawType}`
-    const text = readMineruText(item)
+    const text = rawType === 'equation' ? readMineruEquationText(item) : readMineruText(item)
 
     if (rawType === 'text') {
       const headingLevel = normalizeHeadingLevel(item.text_level)
@@ -740,6 +740,71 @@ function readMineruText(item: MineruContentListItem): string {
   }
 
   return ''
+}
+
+function readMineruEquationText(item: MineruContentListItem): string {
+  const candidates = [
+    item.latex,
+    item.latex_text,
+    item.text_format,
+    item.text,
+    item.content,
+    item.equation,
+    item.html
+  ]
+
+  for (const candidate of candidates) {
+    const text = normalizeMineruEquationCandidate(candidate)
+    if (text) {
+      return text
+    }
+  }
+
+  return ''
+}
+
+function normalizeMineruEquationCandidate(input: unknown): string {
+  if (typeof input !== 'string') {
+    return ''
+  }
+
+  const trimmed = input.trim()
+  if (!trimmed) {
+    return ''
+  }
+
+  const normalized = stripFormulaDelimiters(stripHtmlTags(decodeBasicHtmlEntities(trimmed))).trim()
+  if (/^(latex|html|text|plain|markdown)$/i.test(normalized)) {
+    return ''
+  }
+
+  return normalized
+}
+
+function stripFormulaDelimiters(input: string): string {
+  return input
+    .replace(/^\\\[\s*/, '')
+    .replace(/\s*\\\]$/, '')
+    .replace(/^\\\(\s*/, '')
+    .replace(/\s*\\\)$/, '')
+    .replace(/^\$\$\s*/, '')
+    .replace(/\s*\$\$$/, '')
+    .replace(/^\$\s*/, '')
+    .replace(/\s*\$$/, '')
+}
+
+function stripHtmlTags(input: string): string {
+  return input.replace(/<[^>]*>/g, ' ')
+}
+
+function decodeBasicHtmlEntities(input: string): string {
+  return input
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
 }
 
 function normalizeHeadingLevel(input: unknown): 1 | 2 | 3 | undefined {

@@ -7,6 +7,291 @@
   background: #f8f9fa;
 }
 
+.milkdown-note-surface {
+  background: #f8f9fa;
+}
+
+.milkdown-note-surface.translation-compare {
+  position: relative;
+  background: #f3f5f7;
+}
+
+.milkdown-note-surface.translation-compare .note-format-toolbar,
+.milkdown-note-surface.translation-compare .note-insert-toolbar,
+.milkdown-note-surface.translation-compare .milkdown-save-action {
+  display: none;
+}
+
+.milkdown-note-toolbar {
+  justify-content: flex-start;
+}
+
+.milkdown-note-status {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.milkdown-note-status span {
+  max-width: 420px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.milkdown-note-scroll {
+  padding: 24px;
+}
+
+.milkdown-note-surface.translation-compare .milkdown-note-scroll {
+  padding: 20px 24px 28px;
+  overflow-x: auto;
+  cursor: none;
+}
+
+.milkdown-note-page {
+  min-height: calc(100% - 48px);
+}
+
+.milkdown-note-surface.translation-compare .milkdown-note-page {
+  width: min(1360px, calc(100vw - 72px));
+  min-width: 1120px;
+  max-width: none;
+  margin: 0 auto;
+  padding: 34px 44px 52px;
+}
+
+.milkdown-note-surface.translation-compare .milkdown-note-host,
+.milkdown-note-surface.translation-compare .milkdown-note-host .milkdown {
+  width: 100%;
+  max-width: none;
+}
+
+.milkdown-note-surface.translation-compare .ProseMirror {
+  caret-color: transparent;
+}
+
+.milkdown-note-surface.translation-compare .milkdown-note-host .milkdown,
+.milkdown-note-surface.translation-compare .milkdown-note-host .milkdown * {
+  cursor: none;
+}
+
+.milkdown-note-surface.translation-compare .milkdown table {
+  width: 100%;
+  table-layout: fixed;
+  margin: 18px 0 0;
+  border-collapse: collapse;
+}
+
+.milkdown-note-surface.translation-compare .milkdown th,
+.milkdown-note-surface.translation-compare .milkdown td {
+  padding: 10px 12px;
+  border: 1px solid var(--border-muted);
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+
+.milkdown-note-surface.translation-compare .milkdown th {
+  background: #eef2f5;
+  font-weight: 700;
+}
+
+.milkdown-note-surface.translation-compare .milkdown th:first-child,
+.milkdown-note-surface.translation-compare .milkdown td:first-child {
+  width: 18%;
+}
+
+.milkdown-note-surface.translation-compare .milkdown th:nth-child(2),
+.milkdown-note-surface.translation-compare .milkdown td:nth-child(2),
+.milkdown-note-surface.translation-compare .milkdown th:nth-child(3),
+.milkdown-note-surface.translation-compare .milkdown td:nth-child(3) {
+  width: 41%;
+}
+
+.milkdown-note-surface.translation-compare .translation-sentence {
+  border-radius: 3px;
+  box-decoration-break: clone;
+  transition:
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+  -webkit-box-decoration-break: clone;
+}
+
+.milkdown-note-surface.translation-compare .translation-sentence.translation-sentence--hovered {
+  background: rgba(90, 141, 238, 0.18);
+  box-shadow: 0 0 0 1px rgba(58, 111, 210, 0.28);
+}
+
+.translation-reading-pointer {
+  position: absolute;
+  top: -9999px;
+  left: -9999px;
+  z-index: 12;
+  width: 30px;
+  height: 30px;
+  border: 2px solid rgba(43, 94, 164, 0.72);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.72);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  transition: opacity 90ms ease;
+  will-change: top, left, opacity;
+}
+
+.translation-reading-pointer::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(43, 94, 164, 0.72);
+  content: "";
+  transform: translate(-50%, -50%);
+}
+
+.milkdown-compare-mode-badge {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.milkdown-note-host {
+  min-height: 640px;
+}
+
+.milkdown-note-host .milkdown {
+  background: transparent;
+}
+
+.milkdown-note-host .milkdown a[href^="inspiration-note-block://"] {
+  color: var(--text-primary);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.milkdown-pdf-excerpt {
+  position: relative;
+  box-sizing: content-box;
+  margin: 4px 0 12px;
+  padding: 0 0 0 40px;
+  border-left: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-weight: 700;
+  cursor: default;
+}
+
+.milkdown-pdf-excerpt::before {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 4px;
+  border-radius: 100px;
+  background: var(--crepe-color-selected, #d9dde5);
+  content: '';
+}
+
+.milkdown-pdf-excerpt-header {
+  margin-bottom: 8px;
+  color: #2c5a77;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.milkdown-pdf-excerpt-body {
+  color: inherit;
+  font-size: 16px;
+  font-weight: inherit;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.milkdown-pdf-excerpt-content {
+  min-height: 24px;
+  outline: none;
+}
+
+.milkdown-pdf-excerpt-content a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.milkdown-pdf-excerpt-footer {
+  margin-top: 10px;
+  color: #60717d;
+  font-size: 12px;
+}
+
+.milkdown-ai-answer {
+  margin: 14px 0;
+  padding: 14px 16px;
+  border: 1px solid #d9dfe6;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #f9fafb 0%, #f2f5f7 100%);
+}
+
+.milkdown-ai-answer-header {
+  margin-bottom: 8px;
+  color: #3a5568;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.milkdown-ai-answer-body {
+  color: #1f2a33;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.milkdown-ai-answer-content {
+  min-height: 24px;
+  outline: none;
+  white-space: pre-wrap;
+}
+
+.milkdown-ai-answer-footer {
+  margin-top: 10px;
+  color: #6b7782;
+  font-size: 12px;
+}
+
+.milkdown-formula {
+  margin: 16px 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  cursor: default;
+}
+
+.milkdown-formula-preview {
+  min-height: 0;
+  padding: 0;
+  overflow-x: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.milkdown-formula-preview > .katex-display {
+  margin: 0;
+}
+
+.milkdown-formula-preview.empty {
+  display: grid;
+  place-items: center start;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
 .note-panel-toolbar {
   display: flex;
   align-items: center;
@@ -262,6 +547,15 @@
 
 .note-format-button.italic {
   font-style: italic;
+}
+
+.note-format-button.strike {
+  text-decoration: line-through;
+}
+
+.note-format-button.code {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
 }
 
 .note-format-button.underline {

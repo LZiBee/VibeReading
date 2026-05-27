@@ -23,6 +23,7 @@ import {
   createFreeformNote,
   createPaperTextTemplateNote,
   createPdfSegmentScreenshotNote,
+  createNoteFromMilkdownMarkdown,
   getNoteBlockText,
   noteFontFamilyOptions,
   noteFontSizeOptions,
@@ -37,17 +38,52 @@ import {
   updateNoteDocumentBlocks
 } from '@thesis-agent/notes'
 import type { MediaNoteBlockContent, NoteBlock, NoteBlockStyle, NoteBlockType, NoteDocument } from '@thesis-agent/notes'
-import { normalizeMineruParseResultSegments, type MineruParseBlock, type MineruParseResult, type SourceRef } from '@thesis-agent/shared'
-import { createWorkbenchContext } from '@thesis-agent/workbench'
+import {
+  auditMindmapMarkdown,
+  buildDeckSpecPrompt,
+  buildPaperMindmapPrompt,
+  createManualRepositoryCandidate,
+  discoverRepositoriesFromMineru,
+  generateDeckSpecFromAiDraftJson,
+  mindmapGenerationSystemPrompt,
+  mindmapSkillVersion,
+  pptDeckSystemPrompt,
+  prepareMindmapSourceFromMineru,
+  type GenerateDeckSpecInput,
+  type GenerateDeckSpecResult,
+  type RepositoryCandidate
+} from '@thesis-agent/ai'
+import {
+  normalizeMineruParseResultSegments,
+  type BatchTranslationItem,
+  type CodeRepositoryPreparationResult,
+  type MineruParseBlock,
+  type MineruParseResult,
+  type SelectionExplainResult,
+  type SourceRef
+} from '@thesis-agent/shared'
+import {
+  codeAnalysisAnalyzeCurrentPaperCommand,
+  createCodeAnalysisWorkbenchExtension,
+  createMindmapWorkbenchExtension,
+  createPptWorkbenchExtension,
+  createWorkbenchContext
+} from '@thesis-agent/workbench'
 import * as pdfjs from 'pdfjs-dist'
 import type { PDFPageProxy } from 'pdfjs-dist'
 import type {
   ClipboardImagePayload,
   PdfLayoutSegment,
+  PersistedAppSettingsState,
   PersistedAiSettingsState,
+  PersistedPdfEditorSettingsState,
+  PersistedPptGenerationSettingsState,
+  PersistedTranslationSettingsState,
   PersistedAppState,
   NoteExportFormat,
   PersistedMineruSettingsState,
+  PersistedNoteEditorEngine,
+  PptDeckExportResult,
   PersistedPdfViewState
 } from '../preload/thesis-agent'
 import type { MineruBlockDragPayload } from './app/mineruDrag'
@@ -64,6 +100,11 @@ import {
   defaultAiSettings,
   defaultLibrarySortState,
   defaultMineruSettings,
+  defaultNoteEditorEngine,
+  defaultPdfEditorSettings,
+  defaultPptAiSettings,
+  defaultPptGenerationSettings,
+  defaultTranslationSettings,
   modelOptions,
   noteBlockTypeOptions,
   pdfjsResourceBaseUrl,
@@ -106,6 +147,11 @@ import {
   hasMineruBlockDragPayload,
   readMineruBlockDragPayload
 } from './app/mineruDrag'
+import {
+  buildPptDeckMaterialsForNote,
+  buildPptDeckMaterialsForPaper,
+  buildPptDeckMaterialsForSelection
+} from './app/pptDeckMaterials'
 import { getAiConversationQuestionLabel, getAiConversationScopedMessages } from './app/sidebarUtils'
 import type {
   ActiveAiConversationIdsByPaperPath,
@@ -134,6 +180,7 @@ import type {
   ImageAttachmentItem,
   LibrarySortMode,
   LibraryStructure,
+  MindmapsByPaperPath,
   PdfFileInfoByPath,
   MineruSettings,
   NoteHistorySnapshot,
@@ -167,19 +214,177 @@ import {
   SectionHeader
 } from './components/AppSharedControls'
 import { EditorContent } from './components/editor/EditorContent'
-import { NotePanelContent } from './components/note/NotePanelContent'
+import type { MindmapNodeJumpTarget } from './components/mindmap/MarkmapMindmapViewer'
+import { MilkdownNoteEditor } from './components/note/milkdown/MilkdownNoteEditor'
+import { NotePanelContent, NoteTemplateChooser } from './components/note/NotePanelContent'
 import { ProfileHomePage } from './components/profile/ProfileHomePage'
 import { PrimaryViewContent } from './components/sidebar/SidebarViews'
+import { AppSettingsDialog, type AppSettingsSection } from './components/settings/AppSettingsDialog'
 import pdfWorkerSrc from './pdf.worker?worker&url'
 import { PdfViewer, pdfRendererCacheKey } from './components/PdfViewer'
-import type { PdfViewerToolbarBridge } from './components/PdfViewer'
+import type { PdfPptToolbarSettings, PdfViewerToolbarBridge } from './components/PdfViewer'
+import type { PdfSelectionSnapshot } from './components/pdfviewer/pdfViewerShared'
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerSrc
+
+type PendingAiDraftRequest = {
+  id: string
+  paperPath: string
+  prompt: string
+}
+
+type PptProgressStepId = 'collect' | 'ai' | 'parse' | 'export' | 'finish'
+
+type PptProgressStepState = 'pending' | 'running' | 'success' | 'error' | 'canceled'
+
+type PptProgressStep = {
+  id: PptProgressStepId
+  label: string
+  state: PptProgressStepState
+  detail?: string
+}
+
+type PptProgressDialogState = {
+  open: boolean
+  sourceLabel: string
+  status: 'running' | 'success' | 'error' | 'canceled'
+  message: string
+  error?: string
+  steps: PptProgressStep[]
+  startedAt: number
+  updatedAt: number
+}
+
+type PendingPptExportRetry = {
+  sourceLabel: string
+  successPrefix: string
+  generated: GenerateDeckSpecResult
+  preferredFilePath?: string
+}
+
+type MindmapParseRequiredDialogState = {
+  paperPath: string
+  paperTitle: string
+}
+
+type MindmapProgressStepId = 'resolve' | 'prepare' | 'prompt' | 'ai' | 'audit' | 'persist'
+
+type MindmapProgressStep = {
+  id: MindmapProgressStepId
+  label: string
+  state: PptProgressStepState
+  detail?: string
+}
+
+type MindmapGenerationDebugSnapshot = {
+  paperPath: string
+  providerId: string
+  modelLabel: string
+  parsedBlockCount: number | null
+  sourceCharCount: number | null
+  promptCharCount: number | null
+  outputCharCount: number | null
+  nodeCount: number | null
+  maxDepth: number | null
+  sourceWarnings: string[]
+  auditWarnings: string[]
+  sourcePreview: string
+  promptPreview: string
+  outputPreview: string
+}
+
+type MindmapGenerationDialogState = {
+  open: boolean
+  paperTitle: string
+  paperPath: string
+  status: 'running' | 'success' | 'error'
+  message: string
+  warnings: string[]
+  error?: string
+  steps: MindmapProgressStep[]
+  debug: MindmapGenerationDebugSnapshot
+  startedAt: number
+  updatedAt: number
+}
+
+type CodeAnalysisStepId =
+  | 'check-paper'
+  | 'parse-paper'
+  | 'discover-repository'
+  | 'confirm-repository'
+  | 'fetch-repository'
+  | 'scan-code'
+  | 'align-code'
+  | 'generate-note'
+
+type CodeAnalysisStep = {
+  id: CodeAnalysisStepId
+  label: string
+  state: PptProgressStepState
+  detail?: string
+}
+
+type CodeAnalysisDialogState = {
+  open: boolean
+  paperTitle: string
+  paperPath: string
+  status: 'running' | 'success' | 'error'
+  message: string
+  warnings: string[]
+  error?: string
+  steps: CodeAnalysisStep[]
+  parsedBlockCount: number | null
+  repositoryCandidates: RepositoryCandidate[]
+  selectedRepositoryUrl: string
+  confirmedRepositoryUrl: string
+  repositoryPreparationResult?: CodeRepositoryPreparationResult
+  isPreparingRepository: boolean
+  manualRepositoryUrl: string
+  manualRepositoryError: string
+  startedAt: number
+  updatedAt: number
+}
+
+type CodeAnalysisParseRequiredDialogState = {
+  paperPath: string
+  paperTitle: string
+}
+
+type PptGenerationOptions = PersistedPptGenerationSettingsState
+
+const pptProgressStepDefinitions: Array<Pick<PptProgressStep, 'id' | 'label'>> = [
+  { id: 'collect', label: '整理材料' },
+  { id: 'ai', label: '调用 AI' },
+  { id: 'parse', label: '解析草稿' },
+  { id: 'export', label: '保存 PPTX' },
+  { id: 'finish', label: '完成结果' }
+]
+
+const mindmapProgressStepDefinitions: Array<Pick<MindmapProgressStep, 'id' | 'label'>> = [
+  { id: 'resolve', label: '定位解析结果' },
+  { id: 'prepare', label: '整理来源上下文' },
+  { id: 'prompt', label: '组装提炼 Prompt' },
+  { id: 'ai', label: '调用 AI' },
+  { id: 'audit', label: '审计 Markdown' },
+  { id: 'persist', label: '写入脑图' }
+]
+
+const codeAnalysisStepDefinitions: Array<Pick<CodeAnalysisStep, 'id' | 'label'>> = [
+  { id: 'check-paper', label: '检查文章' },
+  { id: 'parse-paper', label: '解析文章' },
+  { id: 'discover-repository', label: '识别仓库' },
+  { id: 'confirm-repository', label: '确认仓库' },
+  { id: 'fetch-repository', label: '拉取仓库' },
+  { id: 'scan-code', label: '扫描代码' },
+  { id: 'align-code', label: '论文代码对齐' },
+  { id: 'generate-note', label: '生成笔记' }
+]
 
 export function App(): ReactElement {
   const [isStateLoaded, setIsStateLoaded] = useState(false)
   const [activeView, setActiveView] = useState<PrimaryView>('library')
   const [activeEditor, setActiveEditor] = useState<EditorTab>('pdf')
+  const [noteEditorEngine, setNoteEditorEngine] = useState<PersistedNoteEditorEngine>(defaultNoteEditorEngine)
   const [isProfileOpen, setIsProfileOpen] = useState(false)
   const [libraryPdfPaths, setLibraryPdfPaths] = useState<string[]>([])
   const [libraryStructure, setLibraryStructure] = useState<LibraryStructure>({
@@ -189,9 +394,22 @@ export function App(): ReactElement {
   const [openPdfPaths, setOpenPdfPaths] = useState<string[]>([])
   const [selectedPdfPath, setSelectedPdfPath] = useState<string>('')
   const [status, setStatus] = useState('Ready')
+  const [pptProgressDialog, setPptProgressDialog] = useState<PptProgressDialogState | null>(null)
+  const [pendingPptExportRetry, setPendingPptExportRetry] = useState<PendingPptExportRetry | null>(null)
+  const [pptGenerationOptions, setPptGenerationOptions] = useState<PptGenerationOptions>(defaultPptGenerationSettings)
+  const [codeAnalysisParseRequiredDialog, setCodeAnalysisParseRequiredDialog] = useState<CodeAnalysisParseRequiredDialogState | null>(null)
+  const [codeAnalysisDialog, setCodeAnalysisDialog] = useState<CodeAnalysisDialogState | null>(null)
+  const [pendingCodeAnalysisAfterParsePath, setPendingCodeAnalysisAfterParsePath] = useState('')
+  const [mindmapsByPaperPath, setMindmapsByPaperPath] = useState<MindmapsByPaperPath>({})
+  const [mindmapParseRequiredDialog, setMindmapParseRequiredDialog] = useState<MindmapParseRequiredDialogState | null>(null)
+  const [mindmapGenerationDialog, setMindmapGenerationDialog] = useState<MindmapGenerationDialogState | null>(null)
+  const [pendingMindmapAfterParsePath, setPendingMindmapAfterParsePath] = useState('')
+  const pendingMindmapAfterParsePathRef = useRef(pendingMindmapAfterParsePath)
   const [activePdfToolbar, setActivePdfToolbar] = useState<PdfViewerToolbarBridge | null>(null)
   const [isAiConfigOpen, setIsAiConfigOpen] = useState(false)
   const [isAiHistoryOpen, setIsAiHistoryOpen] = useState(false)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [settingsSection, setSettingsSection] = useState<AppSettingsSection>('ai-panel')
   const [isPrimarySidebarCollapsed, setIsPrimarySidebarCollapsed] = useState(false)
   const [dockLayout, setDockLayout] = useState<DockLayoutNode>(initialDockLayout)
   const [hiddenDockPanels, setHiddenDockPanels] = useState<ClosableDockPanelId[]>([])
@@ -202,6 +420,8 @@ export function App(): ReactElement {
   const [selectedNoteIdsByPaperPath, setSelectedNoteIdsByPaperPath] = useState<SelectedNoteIdsByPaperPath>({})
   const [openNoteIdsByPaperPath, setOpenNoteIdsByPaperPath] = useState<OpenNoteIdsByPaperPath>({})
   const [pendingNoteTemplateByPaperPath, setPendingNoteTemplateByPaperPath] = useState<PendingNoteTemplateByPaperPath>({})
+  const [translationCompareNoteIdsByPaperPath, setTranslationCompareNoteIdsByPaperPath] =
+    useState<Record<string, string>>({})
   const [pendingNoteCloseRequest, setPendingNoteCloseRequest] = useState<PendingNoteCloseRequest | null>(null)
   const [focusedNoteBlockRequest, setFocusedNoteBlockRequest] = useState<{
     filePath: string
@@ -221,6 +441,14 @@ export function App(): ReactElement {
   const [focusedAiMessageId, setFocusedAiMessageId] = useState('')
   const [favoriteItemsByKey, setFavoriteItemsByKey] = useState<FavoriteItemsByKey>({})
   const [aiSettings, setAiSettings] = useState<PersistedAiSettingsState>(defaultAiSettings)
+  const [translationSettings, setTranslationSettings] = useState(defaultTranslationSettings)
+  const [pptAiSettings, setPptAiSettings] = useState<PersistedAiSettingsState>(defaultPptAiSettings)
+  const [pdfEditorSettings, setPdfEditorSettings] = useState<PersistedPdfEditorSettingsState>(defaultPdfEditorSettings)
+  const [pendingAiDraftRequest, setPendingAiDraftRequest] = useState<PendingAiDraftRequest | null>(null)
+  const aiSettingsRef = useRef(aiSettings)
+  const translationSettingsRef = useRef(translationSettings)
+  const pptAiSettingsRef = useRef(pptAiSettings)
+  const pptGenerationOptionsRef = useRef(pptGenerationOptions)
   const [mineruSettings, setMineruSettings] = useState<PersistedMineruSettingsState>(defaultMineruSettings)
   const [mineruParseResultByPdfPath, setMineruParseResultByPdfPath] = useState<Record<string, MineruParseResult>>({})
   const [mineruCacheExistsByPdfPath, setMineruCacheExistsByPdfPath] = useState<Record<string, boolean>>({})
@@ -236,6 +464,72 @@ export function App(): ReactElement {
   const [isViewMenuOpen, setIsViewMenuOpen] = useState(false)
   const [isScreenshotCaptureActive, setIsScreenshotCaptureActive] = useState(false)
   const mineruCacheLoadRef = useRef<Set<string>>(new Set())
+  const noteSourceJumpHandlerRef = useRef<((filePath: string, noteId: string, blockId: string) => void) | null>(null)
+  const pendingCodeAnalysisAfterParsePathRef = useRef(pendingCodeAnalysisAfterParsePath)
+  const pptWorkspaceRef = useRef({
+    selectedPdfPath,
+    openPdfPaths,
+    libraryPdfPaths,
+    pdfDisplayNamesByPath,
+    notesByPaperPath,
+    aiConversationsByPaperPath,
+    pdfViewStates,
+    mineruParseResultByPdfPath
+  })
+  const mindmapWorkspaceRef = useRef({
+    selectedPdfPath,
+    openPdfPaths,
+    libraryPdfPaths,
+    pdfDisplayNamesByPath,
+    mineruParseResultByPdfPath
+  })
+
+  useEffect(() => {
+    aiSettingsRef.current = aiSettings
+  }, [aiSettings])
+
+  useEffect(() => {
+    translationSettingsRef.current = translationSettings
+  }, [translationSettings])
+
+  useEffect(() => {
+    pptAiSettingsRef.current = pptAiSettings
+  }, [pptAiSettings])
+
+  useEffect(() => {
+    pptGenerationOptionsRef.current = pptGenerationOptions
+  }, [pptGenerationOptions])
+
+  useEffect(() => {
+    pendingMindmapAfterParsePathRef.current = pendingMindmapAfterParsePath
+  }, [pendingMindmapAfterParsePath])
+
+  useEffect(() => {
+    pendingCodeAnalysisAfterParsePathRef.current = pendingCodeAnalysisAfterParsePath
+  }, [pendingCodeAnalysisAfterParsePath])
+
+  useEffect(() => {
+    pptWorkspaceRef.current = {
+      selectedPdfPath,
+      openPdfPaths,
+      libraryPdfPaths,
+      pdfDisplayNamesByPath,
+      notesByPaperPath,
+      aiConversationsByPaperPath,
+      pdfViewStates,
+      mineruParseResultByPdfPath
+    }
+  }, [aiConversationsByPaperPath, libraryPdfPaths, mineruParseResultByPdfPath, notesByPaperPath, openPdfPaths, pdfDisplayNamesByPath, pdfViewStates, selectedPdfPath])
+
+  useEffect(() => {
+    mindmapWorkspaceRef.current = {
+      selectedPdfPath,
+      openPdfPaths,
+      libraryPdfPaths,
+      pdfDisplayNamesByPath,
+      mineruParseResultByPdfPath
+    }
+  }, [libraryPdfPaths, mineruParseResultByPdfPath, openPdfPaths, pdfDisplayNamesByPath, selectedPdfPath])
 
   const mergeMineruNoteStyle = useCallback((patch: Partial<PersistedMineruSettingsState['noteStyle']>): void => {
     setMineruSettings((current) => ({
@@ -245,6 +539,11 @@ export function App(): ReactElement {
         ...patch
       }
     }))
+  }, [])
+
+  const switchNoteEditorEngine = useCallback((engine: PersistedNoteEditorEngine): void => {
+    setNoteEditorEngine(engine)
+    setStatus(engine === 'milkdown' ? '已切换到 Markdown 笔记编辑器' : '已切到旧版块编辑器兼容模式')
   }, [])
 
   useEffect(() => {
@@ -268,6 +567,7 @@ export function App(): ReactElement {
 
           setActiveView(cachedState.workbench.activeView)
           setActiveEditor(cachedState.workbench.activeEditor === 'profile' ? 'pdf' : cachedState.workbench.activeEditor)
+          setNoteEditorEngine(cachedState.workbench.noteEditorEngine === 'legacy' ? defaultNoteEditorEngine : cachedState.workbench.noteEditorEngine ?? defaultNoteEditorEngine)
           setIsProfileOpen(cachedState.workbench.activeEditor === 'profile')
           setLibraryPdfPaths(restoredLibraryPdfPaths)
           setLibraryStructure(cachedState.workbench.libraryStructure ?? createEmptyLibraryStructure())
@@ -284,12 +584,16 @@ export function App(): ReactElement {
           setPdfDisplayNamesByPath(cachedState.workbench.pdfDisplayNamesByPath ?? {})
         }
 
+        const restoredAiSettings = mergePersistedAiSettings(cachedState.aiSettings, defaultAiSettings)
+        const restoredAppSettings = normalizePersistedAppSettings(cachedState.appSettings, restoredAiSettings)
+
         if (cachedState.aiSettings) {
-          setAiSettings({
-            ...defaultAiSettings,
-            ...cachedState.aiSettings
-          })
+          setAiSettings(restoredAiSettings)
         }
+        setTranslationSettings(restoredAppSettings.translation)
+        setPptAiSettings(restoredAppSettings.pptAi)
+        setPptGenerationOptions(restoredAppSettings.pptGeneration)
+        setPdfEditorSettings(restoredAppSettings.pdfEditor)
 
         if (cachedState.mineruSettings) {
           setMineruSettings({
@@ -401,6 +705,7 @@ export function App(): ReactElement {
         workbench: {
           activeView,
           activeEditor,
+          noteEditorEngine,
           libraryPdfPaths: knownPdfPaths,
           libraryStructure: pruneLibraryStructure(libraryStructure, knownPdfPaths),
           openPdfPaths: persistedOpenPdfPaths,
@@ -416,6 +721,12 @@ export function App(): ReactElement {
           pdfViewStates: prunePdfViewStates(pdfViewStates, knownPdfPaths)
         },
         aiSettings,
+        appSettings: {
+          translation: translationSettings,
+          pptAi: pptAiSettings,
+          pptGeneration: pptGenerationOptions,
+          pdfEditor: pdfEditorSettings
+        },
         mineruSettings,
         mineruResultsByPaperPath: mineruParseResultByPdfPath,
         hiddenMineruOverlayByPaperPath: Object.fromEntries(
@@ -460,6 +771,7 @@ export function App(): ReactElement {
   }, [
     activeEditor,
     activeView,
+    noteEditorEngine,
     activeAiConversationIdsByPaperPath,
     aiConversationsByPaperPath,
     aiSettings,
@@ -479,12 +791,16 @@ export function App(): ReactElement {
     openPdfPaths,
     pdfFileInfoByPath,
     pdfDisplayNamesByPath,
+    pdfEditorSettings,
     pdfViewStates,
     mineruParseResultByPdfPath,
     mineruSettings,
+    pptAiSettings,
+    pptGenerationOptions,
     savedNotesByPaperPath,
     selectedNoteIdsByPaperPath,
-    selectedPdfPath
+    selectedPdfPath,
+    translationSettings
   ])
 
   useEffect(() => {
@@ -541,6 +857,200 @@ export function App(): ReactElement {
     }, 80)
   }
 
+  const openPptProgressDialog = useCallback((sourceLabel: string, message: string): void => {
+    setPptProgressDialog(createPptProgressDialogState(sourceLabel, message))
+  }, [])
+
+  const updatePptProgressStep = useCallback(
+    (stepId: PptProgressStepId, state: PptProgressStepState, detail?: string): void => {
+      setPptProgressDialog((current) => {
+        if (!current) {
+          return current
+        }
+
+        return {
+          ...current,
+          updatedAt: Date.now(),
+          steps: current.steps.map((step) => (step.id === stepId ? { ...step, state, detail } : step))
+        }
+      })
+    },
+    []
+  )
+
+  const finishPptProgress = useCallback(
+    (nextStatus: PptProgressDialogState['status'], message: string, error?: string): void => {
+      setPptProgressDialog((current) => {
+        if (!current) {
+          return current
+        }
+
+        const runningStep = current.steps.find((step) => step.state === 'running')
+        const nextStepState: PptProgressStepState =
+          nextStatus === 'success' ? 'success' : nextStatus === 'canceled' ? 'canceled' : 'error'
+
+        return {
+          ...current,
+          open: true,
+          status: nextStatus,
+          message,
+          error,
+          updatedAt: Date.now(),
+          steps: current.steps.map((step) => {
+            if (step.id === 'finish') {
+              return { ...step, state: nextStepState, detail: message }
+            }
+
+            if (runningStep && step.id === runningStep.id) {
+              return { ...step, state: nextStepState, detail: error ?? message }
+            }
+
+            return step
+          })
+        }
+      })
+    },
+    []
+  )
+
+  const failPptProgress = useCallback(
+    (message: string): void => {
+      finishPptProgress('error', '生成 PPT 失败', message)
+    },
+    [finishPptProgress]
+  )
+
+  const closePptProgressDialog = useCallback((): void => {
+    setPptProgressDialog((current) => {
+      if (!current) {
+        return current
+      }
+
+      return current.status === 'running' ? { ...current, open: false } : null
+    })
+  }, [])
+
+  const closeMindmapGenerationDialog = useCallback((): void => {
+    setMindmapGenerationDialog((current) => {
+      if (!current) {
+        return current
+      }
+
+      return current.status === 'running' ? { ...current, open: false } : null
+    })
+  }, [])
+
+  const getPptExportSuccessStatus = useCallback(
+    (generated: GenerateDeckSpecResult, auditIssues: Array<{ severity: string }>, prefix = '已导出'): string => {
+      const warningCount = auditIssues.filter((issue) => issue.severity !== 'info').length + generated.warnings.length
+      const modeLabel = 'AI 版 PPT'
+
+      return warningCount > 0 ? `${prefix}${modeLabel}，含 ${warningCount} 条提示` : `${prefix}${modeLabel}`
+    },
+    []
+  )
+
+  const runGeneratedPptDeckExport = useCallback(
+    async (retryState: PendingPptExportRetry): Promise<PptDeckExportResult> => {
+      updatePptProgressStep(
+        'export',
+        'running',
+        retryState.preferredFilePath?.trim()
+          ? '正在重新打开保存窗口，请确认或修改 .pptx 保存位置'
+          : '正在打开保存窗口，请选择 .pptx 保存位置'
+      )
+
+      try {
+        const exportResult = await window.thesisAgent.exportPptDeck({
+          deck: retryState.generated.deck,
+          suggestedFileName: retryState.generated.deck.title,
+          preferredFilePath: retryState.preferredFilePath
+        })
+
+        if (exportResult.canceled) {
+          setPendingPptExportRetry(null)
+          updatePptProgressStep('export', 'canceled', '已取消保存位置选择')
+          finishPptProgress('canceled', '已取消 PPT 导出')
+          setStatus('已取消 PPT 导出')
+          return exportResult
+        }
+
+        if (exportResult.ok) {
+          setPendingPptExportRetry(null)
+          const successMessage = getPptExportSuccessStatus(
+            retryState.generated,
+            exportResult.auditIssues,
+            retryState.successPrefix
+          )
+          updatePptProgressStep('export', 'success', describePptExportResult(retryState.generated, exportResult.auditIssues))
+          finishPptProgress('success', successMessage)
+          setStatus(successMessage)
+          return exportResult
+        }
+
+        const message = exportResult.message ?? 'PPT 导出未完成'
+        const shouldAllowRetry = exportResult.errorCode !== 'AUDIT_FAILED'
+        setPendingPptExportRetry(
+          shouldAllowRetry
+            ? {
+                ...retryState,
+                preferredFilePath: exportResult.filePath ?? retryState.preferredFilePath
+              }
+            : null
+        )
+        updatePptProgressStep('export', 'error', message)
+        finishPptProgress('error', shouldAllowRetry ? '保存 PPT 失败，可重试保存' : 'PPT 导出未完成', message)
+        setStatus(message)
+        return exportResult
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'PPT 导出未完成'
+        setPendingPptExportRetry(retryState)
+        updatePptProgressStep('export', 'error', message)
+        finishPptProgress('error', '保存 PPT 失败，可重试保存', message)
+        setStatus(message)
+        return {
+          canceled: false,
+          ok: false,
+          slideCount: retryState.generated.deck.slides.length,
+          auditIssues: [],
+          errorCode: 'EXPORT_FAILED',
+          message
+        }
+      }
+    },
+    [finishPptProgress, getPptExportSuccessStatus, updatePptProgressStep]
+  )
+
+  const retryPptDeckExport = useCallback((): void => {
+    if (!pendingPptExportRetry) {
+      return
+    }
+
+    setPptProgressDialog((current) => {
+      if (!current) {
+        return createPptProgressDialogState(pendingPptExportRetry.sourceLabel, '正在重新尝试保存已生成的 PPT')
+      }
+
+      return {
+        ...current,
+        open: true,
+        status: 'running',
+        message: '正在重新尝试保存已生成的 PPT',
+        error: undefined,
+        updatedAt: Date.now(),
+        steps: current.steps.map((step) => {
+          if (step.id === 'export' || step.id === 'finish') {
+            return { ...step, state: 'pending', detail: undefined }
+          }
+
+          return step
+        })
+      }
+    })
+
+    void runGeneratedPptDeckExport(pendingPptExportRetry)
+  }, [pendingPptExportRetry, runGeneratedPptDeckExport])
+
   const workbench = useMemo(() => {
     const context = createWorkbenchContext()
 
@@ -574,13 +1084,794 @@ export function App(): ReactElement {
       id: 'ai.askSelection',
       title: 'Ask AI',
       category: 'AI',
-      run: () => {
-        setStatus('AI Provider is not configured yet')
+      run: (payload: unknown) => {
+        const data = isObjectRecord(payload) ? payload : {}
+        const selection = isObjectRecord(data.selection) ? data.selection : data
+        const text = typeof selection.text === 'string' ? selection.text.trim() : ''
+        const filePath = typeof data.filePath === 'string' ? data.filePath : ''
+        const pageNo = typeof selection.pageNo === 'number' ? selection.pageNo : undefined
+
+        if (!text) {
+          setStatus('当前没有可发送给 AI 的 PDF 选区')
+          return
+        }
+
+        if (!filePath) {
+          setStatus('请先打开一个 PDF，再询问 AI')
+          return
+        }
+
+        setLibraryPdfPaths((currentPaths) =>
+          currentPaths.includes(filePath) ? currentPaths : [...currentPaths, filePath]
+        )
+        setOpenPdfPaths((currentPaths) =>
+          currentPaths.includes(filePath) ? currentPaths : [...currentPaths, filePath]
+        )
+        setSelectedPdfPath(filePath)
+        setIsProfileOpen(false)
+        setDockLayout((currentLayout) => completeDockLayout(currentLayout))
+        setHiddenDockPanels((current) => current.filter((panelId) => panelId !== 'ai'))
+        setIsAiConfigOpen(false)
+        setIsAiHistoryOpen(false)
+        setPendingAiDraftRequest({
+          id: `selection_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          paperPath: filePath,
+          prompt: buildAskSelectionPrompt(text, pageNo)
+        })
+        setStatus('已将选区送入 AI 输入框')
       }
     })
 
+    context.commands.registerCommand({
+      id: 'selection.explain',
+      title: '释义/翻译',
+      category: 'Selection',
+      run: async (payload: unknown): Promise<SelectionExplainResult> => {
+        const data = isObjectRecord(payload) ? payload : {}
+        const selection = isObjectRecord(data.selection) ? data.selection : data
+        const translationConfig = translationSettingsRef.current
+        const settings = resolveAiSettingsWithSharedKey(translationConfig.ai, aiSettingsRef.current)
+        const text = typeof selection.text === 'string' ? selection.text : ''
+
+        if (!text.trim()) {
+          throw new Error('当前没有可解释的 PDF 选区')
+        }
+
+        return window.thesisAgent.explainSelection({
+          text,
+          paperPath: typeof data.filePath === 'string' ? data.filePath : undefined,
+          pageNo: typeof selection.pageNo === 'number' ? selection.pageNo : undefined,
+          sourceRef: isObjectRecord(selection.sourceRef) ? (selection.sourceRef as SourceRef) : undefined,
+          targetLanguage: translationConfig.targetLanguage || 'zh-CN',
+          dictionaryEnabled: translationConfig.dictionaryEnabled,
+          ai: {
+            providerId: settings.providerId,
+            baseUrl: settings.baseUrl,
+            model: settings.model,
+            reasoningEffort: settings.reasoningEffort,
+            disableResponseStorage: settings.disableResponseStorage,
+            requiresOpenAiAuth: settings.requiresOpenAiAuth,
+            apiKey: settings.apiKey
+          }
+        })
+      }
+    })
+
+    context.commands.registerCommand({
+      id: 'note.jumpToSource',
+      title: 'Jump To Note Source',
+      category: 'Note',
+      run: (payload: unknown) => {
+        if (!isObjectRecord(payload)) {
+          return
+        }
+
+        const filePath = typeof payload.filePath === 'string' ? payload.filePath : ''
+        const noteId = typeof payload.noteId === 'string' ? payload.noteId : ''
+        const blockId = typeof payload.blockId === 'string' ? payload.blockId : ''
+
+        if (!filePath || !noteId || !blockId) {
+          return
+        }
+
+        noteSourceJumpHandlerRef.current?.(filePath, noteId, blockId)
+      }
+    })
+
+    const generateDeckSpecWithAi = async (input: GenerateDeckSpecInput): Promise<GenerateDeckSpecResult> => {
+      const settings = resolveAiSettingsWithSharedKey(pptAiSettingsRef.current, aiSettingsRef.current)
+      const modelLabel = settings.model.trim() || '当前模型'
+
+      updatePptProgressStep('ai', 'running', `正在请求 ${modelLabel} 生成结构化 SlideDraft JSON`)
+      if (!settings.baseUrl.trim() || !settings.model.trim()) {
+        updatePptProgressStep('ai', 'error', '缺少 Base URL 或模型名称')
+        throw new Error('PPT 生成需要先配置 AI Provider 的 Base URL 和模型。')
+      }
+
+      if (settings.requiresOpenAiAuth && !settings.apiKey.trim()) {
+        updatePptProgressStep('ai', 'error', '缺少 PPT AI 或 AI 栏共享 API Key')
+        throw new Error('PPT 生成需要填写 PPT AI API Key，或在 AI 栏配置默认共享 API Key。')
+      }
+
+      let failingStep: PptProgressStepId = 'ai'
+      try {
+        const aiResult = await window.thesisAgent.sendAiMessage({
+          providerId: settings.providerId,
+          baseUrl: settings.baseUrl,
+          wireApi: 'responses',
+          model: settings.model,
+          reasoningEffort: settings.reasoningEffort,
+          disableResponseStorage: settings.disableResponseStorage,
+          requiresOpenAiAuth: settings.requiresOpenAiAuth,
+          apiKey: settings.apiKey,
+          systemPrompt: pptDeckSystemPrompt,
+          messages: [],
+          prompt: buildDeckSpecPrompt(input),
+          maxOutputTokens: 4096
+        })
+
+        if (!aiResult.ok || !aiResult.outputText?.trim()) {
+          throw new Error(`AI PPT 草稿生成失败：${aiResult.message}`)
+        }
+
+        updatePptProgressStep('ai', 'success', `AI 已返回 ${aiResult.outputText.trim().length} 字符，开始解析草稿`)
+        failingStep = 'parse'
+        updatePptProgressStep('parse', 'running', '正在校验 JSON、合并来源引用并组装 DeckSpec')
+        const generated = generateDeckSpecFromAiDraftJson({
+          ...input,
+          aiOutput: aiResult.outputText,
+          generatorVersion: 'desktop-ai-ppt-draft-0.3.0'
+        })
+        updatePptProgressStep('parse', 'success', describePptGeneration(generated))
+
+        return {
+          ...generated,
+          warnings: generated.warnings
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'AI 调用或 JSON 解析失败'
+        const normalizedMessage = message.startsWith('AI PPT 草稿生成失败') ? message : `AI PPT 草稿生成失败：${message}`
+        updatePptProgressStep(failingStep, 'error', normalizedMessage)
+        throw new Error(normalizedMessage)
+      }
+    }
+    void createPptWorkbenchExtension({
+      generateFromPaper: async (input) => {
+        const request = input ?? {}
+        const workspace = pptWorkspaceRef.current
+        const paperPath =
+          request.filePath || request.paperId || workspace.selectedPdfPath || workspace.openPdfPaths[0] || workspace.libraryPdfPaths[0] || ''
+
+        if (!paperPath) {
+          const message = '请先打开一个 PDF，再生成 PPT'
+          setStatus(message)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+
+        const paperTitle = request.paperTitle || getPdfDisplayName(paperPath, workspace.pdfDisplayNamesByPath)
+        openPptProgressDialog(`论文：${paperTitle}`, '正在准备从当前论文生成 PPT')
+        setPendingPptExportRetry(null)
+        updatePptProgressStep('collect', 'running', '正在读取 PDF 文本、关联笔记和 AI 回答')
+        setStatus('正在整理当前论文、笔记和 AI 回答，并调用 AI 生成 PPT 草稿')
+
+        try {
+          const materials = applyPptGenerationOptions(await buildPptDeckMaterialsForPaper({
+            paperPath,
+            paperTitle,
+            notes: getPaperNotes(workspace.notesByPaperPath, paperPath),
+            conversations: workspace.aiConversationsByPaperPath[paperPath] ?? [],
+            pdfViewState: workspace.pdfViewStates[paperPath],
+            mineruResult: workspace.mineruParseResultByPdfPath[paperPath],
+            readPdfPageTexts: extractPdfTextForAiContext
+          }), pptGenerationOptionsRef.current)
+          updatePptProgressStep('collect', 'success', describePptMaterials(materials))
+          const generated = await generateDeckSpecWithAi({
+            intent: {
+              sourceType: 'paper',
+              sourceIds: [paperPath],
+              audience: 'group-meeting',
+              language: 'zh-CN',
+              tone: 'academic',
+              targetSlideCount: 10,
+              includeAgenda: true,
+              includeReferences: true,
+              includeAppendix: false,
+              ...request.intent
+            },
+            materials
+          })
+          const exportResult = await runGeneratedPptDeckExport({
+            sourceLabel: `论文：${paperTitle}`,
+            successPrefix: '已导出',
+            generated
+          })
+
+          return {
+            deck: generated.deck,
+            exportResult,
+            warnings: generated.warnings,
+            message: exportResult.message
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '未知错误'
+          setPendingPptExportRetry(null)
+          failPptProgress(message)
+          setStatus(`生成 PPT 失败：${message}`)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+      },
+      generateFromNote: async (input) => {
+        const request = input ?? {}
+        const workspace = pptWorkspaceRef.current
+        const paperPath = request.paperId || workspace.selectedPdfPath || workspace.openPdfPaths[0] || workspace.libraryPdfPaths[0] || ''
+        const notes = paperPath ? getPaperNotes(workspace.notesByPaperPath, paperPath) : []
+        const note = notes.find((currentNote) => currentNote.id === request.noteId) ?? notes[0]
+
+        if (!note) {
+          const message = '当前没有可用于生成 PPT 的笔记'
+          setStatus(message)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+
+        openPptProgressDialog(`笔记：${note.title || '未命名笔记'}`, '正在准备从当前笔记生成 PPT')
+        setPendingPptExportRetry(null)
+        updatePptProgressStep('collect', 'running', '正在整理笔记正文、来源引用和图片资产')
+        setStatus('正在调用 AI 从当前笔记生成 PPT 草稿')
+
+        try {
+          const materials = buildPptDeckMaterialsForNote({
+            paperPath,
+            note,
+            paperTitle: request.title || note.title || (paperPath ? getPdfDisplayName(paperPath, workspace.pdfDisplayNamesByPath) : '笔记汇报')
+          })
+          updatePptProgressStep('collect', 'success', describePptMaterials(materials))
+          const generated = await generateDeckSpecWithAi({
+            intent: {
+              sourceType: 'note',
+              sourceIds: [note.id],
+              audience: 'group-meeting',
+              language: 'zh-CN',
+              tone: 'academic',
+              targetSlideCount: 8,
+              includeAgenda: true,
+              includeReferences: true,
+              includeAppendix: false,
+              ...request.intent
+            },
+            materials
+          })
+          const exportResult = await runGeneratedPptDeckExport({
+            sourceLabel: `笔记：${note.title || '未命名笔记'}`,
+            successPrefix: '已从笔记导出',
+            generated
+          })
+
+          return {
+            deck: generated.deck,
+            exportResult,
+            warnings: generated.warnings,
+            message: exportResult.message
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '未知错误'
+          setPendingPptExportRetry(null)
+          failPptProgress(message)
+          setStatus(`生成 PPT 失败：${message}`)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+      },
+      generateFromSelection: async (input) => {
+        const request = input ?? {}
+        const text = request.text?.trim() ?? ''
+        if (!text) {
+          const message = '当前没有可用于生成 PPT 的选区文本'
+          setStatus(message)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+
+        openPptProgressDialog('PDF 选区', '正在准备从选区文本生成 PPT')
+        setPendingPptExportRetry(null)
+        updatePptProgressStep('collect', 'running', '正在整理选区文本和来源页码')
+        setStatus('正在调用 AI 从选区文本生成 PPT 草稿')
+
+        try {
+          const paperPath = request.paperId || pptWorkspaceRef.current.selectedPdfPath
+          const materials = buildPptDeckMaterialsForSelection({
+            text,
+            paperPath,
+            paperTitle: paperPath ? getPdfDisplayName(paperPath, pptWorkspaceRef.current.pdfDisplayNamesByPath) : undefined,
+            pageNo: request.pageNo,
+            sourceRef: request.sourceRef
+          })
+          updatePptProgressStep('collect', 'success', describePptMaterials(materials))
+          const generated = await generateDeckSpecWithAi({
+            intent: {
+              sourceType: 'selection',
+              sourceIds: [paperPath || 'selection'],
+              audience: 'group-meeting',
+              language: 'zh-CN',
+              tone: 'academic',
+              targetSlideCount: 6,
+              includeAgenda: true,
+              includeReferences: false,
+              includeAppendix: false,
+              ...request.intent
+            },
+            materials
+          })
+          const exportResult = await runGeneratedPptDeckExport({
+            sourceLabel: 'PDF 选区',
+            successPrefix: '已从选区导出',
+            generated
+          })
+
+          return {
+            deck: generated.deck,
+            exportResult,
+            warnings: generated.warnings,
+            message: exportResult.message
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '未知错误'
+          setPendingPptExportRetry(null)
+          failPptProgress(message)
+          setStatus(`生成 PPT 失败：${message}`)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+      },
+      exportDeck: async (input) => {
+        return window.thesisAgent.exportPptDeck({
+          deck: input.deck,
+          suggestedFileName: input.suggestedFileName
+        })
+      }
+    }).activate(context)
+
+    void createMindmapWorkbenchExtension({
+      generateFromPaper: async (input) => {
+        const workspace = mindmapWorkspaceRef.current
+        const paperPath =
+          input.filePath || input.paperId || workspace.selectedPdfPath || workspace.openPdfPaths[0] || workspace.libraryPdfPaths[0] || ''
+
+        if (!paperPath) {
+          const message = '请先打开一个 PDF，再生成脑图'
+          setStatus(message)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+
+        const paperTitle = input.paperTitle || getPdfDisplayName(paperPath, workspace.pdfDisplayNamesByPath)
+        let mineruResult = workspace.mineruParseResultByPdfPath[paperPath]
+
+        if (!mineruResult) {
+          setStatus('正在查找当前 PDF 的 MinerU 解析缓存')
+          const cachedResult = await window.thesisAgent.readCachedMineruResult(paperPath)
+          if (cachedResult) {
+            mineruResult = normalizeMineruParseResultSegments(cachedResult)
+            setMineruParseResultByPdfPath((current) => ({
+              ...current,
+              [paperPath]: mineruResult
+            }))
+            setMineruCacheExistsByPdfPath((current) => ({
+              ...current,
+              [paperPath]: true
+            }))
+          }
+        }
+
+        if (!mineruResult) {
+          setMindmapParseRequiredDialog({
+            paperPath,
+            paperTitle
+          })
+          setStatus('生成脑图前需要先解析当前 PDF')
+          return {
+            requiresParsing: true,
+            warnings: ['当前 PDF 尚未解析，需要先用 MinerU 解析后再生成脑图。'],
+            message: '需要先解析 PDF'
+          }
+        }
+
+        const settings = aiSettingsRef.current
+        if (!settings.baseUrl.trim() || !settings.model.trim()) {
+          const message = '生成脑图需要先配置 AI Provider 的 Base URL 和模型。'
+          setStatus(message)
+          setIsAiConfigOpen(true)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+
+        if (settings.requiresOpenAiAuth && !settings.apiKey.trim()) {
+          const message = '生成脑图需要填写当前 AI Provider 的 API Key。'
+          setStatus(message)
+          setIsAiConfigOpen(true)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+
+        const modelLabel = settings.providerId ? `${settings.providerId} / ${settings.model}` : settings.model
+        const debugSnapshot: MindmapGenerationDebugSnapshot = {
+          paperPath,
+          providerId: settings.providerId,
+          modelLabel,
+          parsedBlockCount: mineruResult.blocks.length,
+          sourceCharCount: null,
+          promptCharCount: null,
+          outputCharCount: null,
+          nodeCount: null,
+          maxDepth: null,
+          sourceWarnings: [],
+          auditWarnings: [],
+          sourcePreview: '',
+          promptPreview: '',
+          outputPreview: ''
+        }
+
+        setMindmapGenerationDialog(createMindmapGenerationDialogState({
+          paperPath,
+          paperTitle,
+          message: '正在定位解析结果并准备生成脑图',
+          debug: debugSnapshot
+        }))
+        setMindmapGenerationDialog((current) =>
+          updateMindmapGenerationStep(
+            current,
+            'resolve',
+            'success',
+            `已找到 MinerU 解析结果：${mineruResult.blocks.length} 个解析块`
+          )
+        )
+        setMindmapGenerationDialog((current) =>
+          updateMindmapGenerationStep(current, 'prepare', 'running', '正在转换为带页码的脑图来源 Markdown')
+        )
+        setMindmapGenerationDialog((current) => (current ? { ...current, message: '正在整理 MinerU 解析结果' } : current))
+        setStatus('正在整理 MinerU 解析结果')
+
+        const updateMindmapDebug = (patch: Partial<MindmapGenerationDebugSnapshot>): void => {
+          setMindmapGenerationDialog((current) =>
+            current
+              ? {
+                  ...current,
+                  updatedAt: Date.now(),
+                  debug: {
+                    ...current.debug,
+                    ...patch
+                  }
+                }
+              : current
+          )
+        }
+
+        const failMindmapGeneration = (message: string): void => {
+          setMindmapGenerationDialog((current) => finishMindmapGenerationDialog(current, 'error', '生成脑图失败', message))
+          setStatus(`生成脑图失败：${message}`)
+        }
+
+        try {
+          const source = prepareMindmapSourceFromMineru({
+            paperId: paperPath,
+            title: paperTitle,
+            result: mineruResult
+          })
+          updateMindmapDebug({
+            sourceCharCount: source.markdown.length,
+            sourceWarnings: source.warnings,
+            sourcePreview: buildMindmapPreviewText(source.markdown)
+          })
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(
+              current,
+              'prepare',
+              'success',
+              `已整理 ${source.blocks.length} 个可用块，来源约 ${source.markdown.length} 字符`
+            )
+          )
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(current, 'prompt', 'running', '正在注入 skill 规则并组装 AI Prompt')
+          )
+
+          const prompt = buildPaperMindmapPrompt({
+            source,
+            language: 'zh-CN',
+            maxDepth: 4,
+            maxNodeChars: 30
+          })
+          updateMindmapDebug({
+            promptCharCount: prompt.length,
+            promptPreview: buildMindmapPreviewText(prompt)
+          })
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(current, 'prompt', 'success', `Prompt 已组装：${prompt.length} 字符，包含 4 个 mindmap skill`)
+          )
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(current, 'ai', 'running', `正在请求 ${modelLabel}，maxOutputTokens=4096`)
+          )
+          setMindmapGenerationDialog((current) =>
+            current ? { ...current, message: `正在调用 AI 生成 markmap Markdown：${modelLabel}` } : current
+          )
+          setStatus('正在调用 AI 生成论文脑图')
+
+          const aiStartedAt = Date.now()
+          const aiResult = await window.thesisAgent.sendAiMessage({
+            providerId: settings.providerId,
+            baseUrl: settings.baseUrl,
+            wireApi: 'responses',
+            model: settings.model,
+            reasoningEffort: settings.reasoningEffort,
+            disableResponseStorage: settings.disableResponseStorage,
+            requiresOpenAiAuth: settings.requiresOpenAiAuth,
+            apiKey: settings.apiKey,
+            systemPrompt: mindmapGenerationSystemPrompt,
+            messages: [],
+            prompt,
+            maxOutputTokens: 4096
+          })
+
+          const outputText = aiResult.outputText?.trim() ?? ''
+          updateMindmapDebug({
+            outputCharCount: outputText.length,
+            outputPreview: buildMindmapPreviewText(outputText)
+          })
+
+          if (!aiResult.ok || !outputText) {
+            setMindmapGenerationDialog((current) =>
+              updateMindmapGenerationStep(current, 'ai', 'error', aiResult.message || 'AI 没有返回可用于生成脑图的 Markdown')
+            )
+            throw new Error(aiResult.message || 'AI 没有返回可用于生成脑图的 Markdown。')
+          }
+
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(
+              current,
+              'ai',
+              'success',
+              `AI 已返回 ${outputText.length} 字符，用时 ${Math.max(1, Math.round((Date.now() - aiStartedAt) / 1000))} 秒`
+            )
+          )
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(current, 'audit', 'running', '正在清洗代码围栏、HTML、危险协议并检查层级')
+          )
+          setMindmapGenerationDialog((current) =>
+            current ? { ...current, message: 'AI 已返回，正在审计 Markmap Markdown' } : current
+          )
+
+          const audit = auditMindmapMarkdown({
+            markdown: outputText,
+            maxDepth: 4,
+            maxNodeChars: 42
+          })
+          updateMindmapDebug({
+            nodeCount: audit.nodeCount,
+            maxDepth: audit.maxDepth,
+            auditWarnings: audit.warnings
+          })
+
+          if (!audit.ok) {
+            const auditMessage = audit.issues.map((issue) => issue.message).join('；') || '脑图 Markdown 审计未通过。'
+            setMindmapGenerationDialog((current) => updateMindmapGenerationStep(current, 'audit', 'error', auditMessage))
+            throw new Error(auditMessage)
+          }
+
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(
+              current,
+              'audit',
+              'success',
+              `审计通过：${audit.nodeCount} 个节点，最大 ${audit.maxDepth} 层，${audit.warnings.length} 条 warning`
+            )
+          )
+          setMindmapGenerationDialog((current) =>
+            updateMindmapGenerationStep(current, 'persist', 'running', '正在写入当前 Renderer 脑图状态并打开 mindmap tab')
+          )
+          setMindmapGenerationDialog((current) =>
+            current ? { ...current, message: '审计通过，正在写入脑图视图' } : current
+          )
+          setStatus('正在打开论文脑图')
+
+          const allWarnings = [...source.warnings, ...audit.warnings]
+          const now = new Date().toISOString()
+          setMindmapsByPaperPath((current) => ({
+            ...current,
+            [paperPath]: {
+              id: `mindmap_${Date.now()}`,
+              paperPath,
+              paperTitle,
+              markdown: audit.markdown,
+              model: settings.model,
+              nodeCount: audit.nodeCount,
+              maxDepth: audit.maxDepth,
+              warnings: allWarnings,
+              skillVersion: mindmapSkillVersion,
+              createdAt: current[paperPath]?.createdAt ?? now,
+              updatedAt: now
+            }
+          }))
+          setSelectedPdfPath(paperPath)
+          setActiveView('graph')
+          setActiveEditor('mindmap')
+          setIsProfileOpen(false)
+          setHiddenDockPanels((current) => current.filter((panelId) => panelId !== 'editor'))
+          setMindmapGenerationDialog((current) =>
+            current
+              ? {
+                  ...finishMindmapGenerationDialog(current, 'success', `已生成 ${audit.nodeCount} 个节点的论文脑图`)!,
+                  warnings: allWarnings,
+                  debug: {
+                    ...current.debug,
+                    sourceWarnings: source.warnings,
+                    auditWarnings: audit.warnings,
+                    nodeCount: audit.nodeCount,
+                    maxDepth: audit.maxDepth
+                  }
+                }
+              : current
+          )
+          setStatus('论文脑图已生成')
+
+          return {
+            markdown: audit.markdown,
+            warnings: allWarnings,
+            message: '论文脑图已生成'
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '生成脑图失败'
+          failMindmapGeneration(message)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+      },
+      openCurrent: (input) => {
+        const workspace = mindmapWorkspaceRef.current
+        const paperPath = input?.filePath || input?.paperId || workspace.selectedPdfPath || workspace.openPdfPaths[0] || ''
+        if (!paperPath) {
+          setStatus('请先打开一个 PDF，再打开脑图')
+          return
+        }
+
+        setSelectedPdfPath(paperPath)
+        setActiveView('graph')
+        setActiveEditor('mindmap')
+        setIsProfileOpen(false)
+        setHiddenDockPanels((current) => current.filter((panelId) => panelId !== 'editor'))
+        setStatus('已打开论文脑图')
+      }
+    }).activate(context)
+
+    void createCodeAnalysisWorkbenchExtension({
+      analyzeCurrentPaper: async (input) => {
+        const workspace = mindmapWorkspaceRef.current
+        const paperPath =
+          input.filePath || input.paperId || workspace.selectedPdfPath || workspace.openPdfPaths[0] || workspace.libraryPdfPaths[0] || ''
+
+        if (!paperPath) {
+          const message = '请先打开一个 PDF，再执行代码解析'
+          setStatus(message)
+          return {
+            warnings: [message],
+            message
+          }
+        }
+
+        const paperTitle = input.paperTitle || getPdfDisplayName(paperPath, workspace.pdfDisplayNamesByPath)
+        let mineruResult = workspace.mineruParseResultByPdfPath[paperPath]
+
+        if (!mineruResult) {
+          setStatus('正在查找当前 PDF 的 MinerU 解析缓存')
+          const cachedResult = await window.thesisAgent.readCachedMineruResult(paperPath)
+          if (cachedResult) {
+            mineruResult = normalizeMineruParseResultSegments(cachedResult)
+            setMineruParseResultByPdfPath((current) => ({
+              ...current,
+              [paperPath]: mineruResult
+            }))
+            setMineruCacheExistsByPdfPath((current) => ({
+              ...current,
+              [paperPath]: true
+            }))
+          }
+        }
+
+        if (!mineruResult) {
+          setCodeAnalysisParseRequiredDialog({
+            paperPath,
+            paperTitle
+          })
+          setPendingCodeAnalysisAfterParsePath(paperPath)
+          setStatus('代码解析前需要先解析当前 PDF')
+          return {
+            requiresParsing: true,
+            warnings: ['当前 PDF 尚未解析，需要先用 MinerU 解析后再执行代码解析。'],
+            message: '需要先解析 PDF'
+          }
+        }
+
+        const repositoryDiscovery = discoverRepositoriesFromMineru({
+          paperTitle,
+          result: mineruResult,
+          maxCandidates: 8
+        })
+        const repositoryCandidateCount = repositoryDiscovery.candidates.length
+        const codeAnalysisMessage =
+          repositoryCandidateCount > 0
+            ? `已识别到 ${repositoryCandidateCount} 个 GitHub 仓库候选，请确认论文主仓库`
+            : '未从 MinerU 解析文本中识别到 GitHub 仓库链接，请手动输入仓库 URL'
+
+        setCodeAnalysisDialog(createCodeAnalysisDialogState({
+          paperPath,
+          paperTitle,
+          parsedBlockCount: mineruResult.blocks.length,
+          message: codeAnalysisMessage,
+          repositoryCandidates: repositoryDiscovery.candidates,
+          repositoryDiscoveryWarnings: repositoryDiscovery.warnings
+        }))
+        setStatus(repositoryCandidateCount > 0 ? '已识别到仓库候选，请确认主仓库' : '未识别到仓库候选，请手动输入 GitHub URL')
+
+        return {
+          message: codeAnalysisMessage,
+          warnings: repositoryDiscovery.warnings
+        }
+      }
+    }).activate(context)
+
     return context
   }, [])
+
+  const startCodeAnalysisRepositoryPreparation = useCallback(
+    (dialog: CodeAnalysisDialogState, candidate: RepositoryCandidate): void => {
+      setCodeAnalysisDialog((current) =>
+        current?.paperPath === dialog.paperPath ? createCodeAnalysisRepositoryPreparationStartState(current, candidate) : current
+      )
+      setStatus(`正在准备代码仓库 ${candidate.owner}/${candidate.repo}`)
+
+      void window.thesisAgent
+        .prepareCodeRepository({
+          paperPath: dialog.paperPath,
+          repositoryUrl: candidate.normalizedUrl
+        })
+        .then((result) => {
+          setCodeAnalysisDialog((current) =>
+            current?.paperPath === dialog.paperPath ? applyCodeAnalysisRepositoryPreparationResult(current, result) : current
+          )
+          setStatus(`代码仓库已准备完成：${result.owner}/${result.repo}，扫描 ${result.fileCount} 个文件`)
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : '仓库准备失败'
+          setCodeAnalysisDialog((current) =>
+            current?.paperPath === dialog.paperPath
+              ? applyCodeAnalysisRepositoryPreparationError(current, candidate.normalizedUrl, message)
+              : current
+          )
+          setStatus(`代码仓库准备失败：${message}`)
+        })
+    },
+    []
+  )
 
   const openRenameDialog = (request: RenameDialogRequest): void => {
     setRenameDialogRequest(request)
@@ -647,6 +1938,76 @@ export function App(): ReactElement {
   }
 
   const currentWorkspacePdfPath = selectedPdfPath || openPdfPaths[0] || libraryPdfPaths[0] || ''
+
+  const exportPaperPpt = (filePath = currentWorkspacePdfPath): void => {
+    void workbench.commands.executeCommand('ppt.generateFromPaper', {
+      filePath,
+      intent: buildPptIntentOverrides(pptGenerationOptionsRef.current)
+    })
+  }
+
+  const exportCurrentPaperPpt = (): void => {
+    exportPaperPpt(currentWorkspacePdfPath)
+  }
+
+  const generatePaperMindmap = (filePath = currentWorkspacePdfPath): void => {
+    void workbench.commands.executeCommand('mindmap.generateFromPaper', {
+      filePath
+    })
+  }
+
+  const generateCurrentPaperMindmap = (): void => {
+    generatePaperMindmap(currentWorkspacePdfPath)
+  }
+
+  const openCurrentPaperMindmap = (filePath = currentWorkspacePdfPath): void => {
+    void workbench.commands.executeCommand('mindmap.openCurrent', {
+      filePath
+    })
+  }
+
+  const jumpToMindmapNodeSource = (target: MindmapNodeJumpTarget): void => {
+    if (!target.paperPath || !target.pageNo) {
+      setStatus('这个脑图节点没有可跳转的 PDF 页码')
+      return
+    }
+
+    const targetPage = Math.max(1, Math.floor(target.pageNo))
+    const mineruResult = mineruParseResultByPdfPath[target.paperPath]
+    const matchedBlock = mineruResult
+      ? findMindmapNodeMineruBlock(mineruResult, target.label, targetPage)
+      : undefined
+    const matchedSegment = matchedBlock ? getMineruBlockSourceSegments(matchedBlock)[0] : undefined
+    const region = matchedBlock && matchedSegment
+      ? createMindmapSourceRegion(target.paperPath, matchedBlock, matchedSegment, target.label)
+      : null
+
+    ensurePaperOpen(target.paperPath)
+    setSelectedPdfPath(target.paperPath)
+    setActiveEditor('pdf')
+    setIsProfileOpen(false)
+    showDockPanel('editor')
+    setPdfViewStates((current) => ({
+      ...current,
+      [target.paperPath]: {
+        ...current[target.paperPath],
+        pageNumber: region?.pageNo ?? targetPage,
+        updatedAt: new Date().toISOString()
+      }
+    }))
+
+    if (region) {
+      setFocusedPdfSourceRegion(region)
+      setFocusedPdfSourceRegionNonce((current) => current + 1)
+    } else {
+      setFocusedPdfSourceRegion(null)
+    }
+
+    setStatus(region
+      ? `已跳到 PDF 第 ${region.pageNo} 页：${target.label || '脑图节点'}`
+      : `已跳到 PDF 第 ${targetPage} 页`)
+  }
+
   const toggleFavorite = (target: FavoriteTarget, label: string): void => {
     const key = getFavoriteKey(target)
     const wasFavorite = Boolean(favoriteItemsByKey[key])
@@ -670,10 +2031,20 @@ export function App(): ReactElement {
   }
 
   const activatePrimaryView = (view: PrimaryView): void => {
-    setActiveEditor('pdf')
     setIsProfileOpen(false)
 
+    if (view === 'graph') {
+      setActiveEditor('graph')
+      setHiddenDockPanels((current) => current.filter((panelId) => panelId !== 'editor'))
+    } else {
+      setActiveEditor('pdf')
+    }
+
     if (view === activeView && !isPrimarySidebarCollapsed) {
+      if (view === 'graph' && activeEditor !== 'graph') {
+        return
+      }
+
       setIsPrimarySidebarCollapsed(true)
       return
     }
@@ -705,6 +2076,7 @@ export function App(): ReactElement {
 
     ensurePaperOpen(filePath)
     setSelectedPdfPath(filePath)
+    setNoteEditorEngine('milkdown')
     setPendingNoteTemplateByPaperPath((current) => ({
       ...current,
       [filePath]: true
@@ -729,6 +2101,7 @@ export function App(): ReactElement {
 
     ensurePaperOpen(filePath)
     setSelectedPdfPath(filePath)
+    setNoteEditorEngine('milkdown')
     const nextNoteId =
       noteId ??
       getOpenNoteIdsForPaper(openNoteIdsByPaperPath, notesByPaperPath, filePath)[0] ??
@@ -764,6 +2137,176 @@ export function App(): ReactElement {
     }
 
     showDockPanel('note')
+  }
+
+  const openFullTranslationForPdf = (filePath: string): void => {
+    const currentFilePath = filePath || currentWorkspacePdfPath
+    if (!currentFilePath) {
+      setStatus('请先打开一个 PDF，再进入全文对照模式')
+      return
+    }
+
+    void ensureMineruResultLoaded(currentFilePath)
+      .then(async (result) => {
+        if (!result) {
+          setStatus('当前 PDF 还没有可用的 MinerU 解析结果')
+          return
+        }
+
+        const translationConfig = translationSettingsRef.current
+        const settings = resolveAiSettingsWithSharedKey(translationConfig.ai, aiSettingsRef.current)
+        const targetLanguage = translationConfig.targetLanguage || 'zh-CN'
+
+        if (!settings.baseUrl.trim() || !settings.model.trim()) {
+          setStatus('请先在 AI 设置中配置可用的模型和 Base URL，再执行全文翻译')
+          return
+        }
+
+        if (settings.requiresOpenAiAuth && !settings.apiKey.trim()) {
+          setStatus('请先在 AI 设置中配置可用的 API Key，再执行全文翻译')
+          return
+        }
+
+        const noteId = `note_translation_${hashString(currentFilePath)}`
+        const now = new Date().toISOString()
+        const normalizedResult = normalizeMineruParseResultSegments(result)
+        const existingNotes = getPaperNotes(notesByPaperPath, currentFilePath)
+        const existingNote = existingNotes.find((note) => note.id === noteId)
+        const translationBlocks = normalizedResult.blocks.filter(isMineruTranslationBlock)
+
+        if (translationBlocks.length === 0) {
+          setStatus('当前 MinerU 结果里没有可翻译的文本块')
+          return
+        }
+
+        const title = normalizedResult.title ? `${normalizedResult.title} · 全文逐段翻译` : `${getFileStem(currentFilePath)} · 全文逐段翻译`
+        const paperId = existingNote?.paperId ?? `paper_${hashString(currentFilePath)}`
+        const translationRows = translationBlocks.map((block, index) => [
+          describeMineruTranslationBlock(block, index + 1),
+          getMineruBlockPlainText(block).trim(),
+          '正在翻译...'
+        ])
+
+        let translationNote = createTranslationCompareNote({
+          noteId,
+          title,
+          paperId,
+          existingNote,
+          rows: translationRows,
+          now
+        })
+
+        const persistTranslationNote = (nextNote: NoteDocument): void => {
+          setNotesByPaperPath((current) => ({
+            ...current,
+            [currentFilePath]: upsertNoteForPaper(getPaperNotes(current, currentFilePath), nextNote)
+          }))
+          setSavedNotesByPaperPath((current) => ({
+            ...current,
+            [currentFilePath]: upsertNoteForPaper(getPaperNotes(current, currentFilePath), nextNote)
+          }))
+        }
+
+        persistTranslationNote(translationNote)
+        setSelectedNoteIdsByPaperPath((current) => ({
+          ...current,
+          [currentFilePath]: noteId
+        }))
+        setOpenNoteIdsByPaperPath((current) => ({
+          ...current,
+          [currentFilePath]: [...normalizeNoteIdList((current as Record<string, unknown>)[currentFilePath]), noteId].filter(
+            (currentNoteId, index, noteIds) => noteIds.indexOf(currentNoteId) === index
+          )
+        }))
+        setTranslationCompareNoteIdsByPaperPath((current) => ({
+          ...current,
+          [currentFilePath]: noteId
+        }))
+        setPendingNoteTemplateByPaperPath((current) => {
+          if (!current[currentFilePath]) {
+            return current
+          }
+
+          const next = { ...current }
+          delete next[currentFilePath]
+          return next
+        })
+        setNoteEditorEngine('milkdown')
+        ensurePaperOpen(currentFilePath)
+        setSelectedPdfPath(currentFilePath)
+        showDockPanel('note')
+
+        const totalBlocks = translationBlocks.length
+        const batchSize = getMineruTranslationBatchSize(translationConfig.fullTextBatchSize)
+        const translationItems = translationBlocks
+          .map((block, index): MineruTranslationBatchItem | null => {
+            const sourceText = getMineruBlockPlainText(block).trim()
+            if (!sourceText) {
+              translationRows[index][2] = '（原文为空）'
+              return null
+            }
+
+            return {
+              id: getMineruTranslationBatchItemId(block, index),
+              label: describeMineruTranslationBlock(block, index + 1),
+              rowIndex: index,
+              text: sourceText
+            }
+          })
+          .filter((item): item is MineruTranslationBatchItem => Boolean(item))
+        const translationBatches = chunkMineruTranslationItems(translationItems, batchSize)
+        let translatedCount = totalBlocks - translationItems.length
+        let completedBatches = 0
+
+        translationNote = createTranslationCompareNote({
+          noteId,
+          title,
+          paperId,
+          existingNote: translationNote,
+          rows: translationRows,
+          now: new Date().toISOString()
+        })
+        persistTranslationNote(translationNote)
+        setStatus(`正在批量翻译：${translatedCount}/${totalBlocks} 段，0/${translationBatches.length} 批，每批 ${batchSize} 个 block`)
+
+        for (const batch of translationBatches) {
+          try {
+            const translationResult = await translateMineruBlockBatch({
+              items: batch,
+              targetLanguage,
+              settings
+            })
+            const translationsById = new Map(translationResult.items.map((item) => [item.id, item.targetText.trim()]))
+            batch.forEach((item) => {
+              translationRows[item.rowIndex][2] = translationsById.get(item.id) || '（未获得译文）'
+            })
+          } catch (error) {
+            const message = error instanceof Error ? error.message : '未知错误'
+            batch.forEach((item) => {
+              translationRows[item.rowIndex][2] = `（翻译失败：${message}）`
+            })
+          }
+
+          completedBatches += 1
+          translatedCount += batch.length
+          translationNote = createTranslationCompareNote({
+            noteId,
+            title,
+            paperId,
+            existingNote: translationNote,
+            rows: translationRows,
+            now: new Date().toISOString()
+          })
+          persistTranslationNote(translationNote)
+          setStatus(`正在批量翻译：${translatedCount}/${totalBlocks} 段，${completedBatches}/${translationBatches.length} 批`)
+        }
+
+        setStatus(`已完成全文逐段翻译：${totalBlocks} 段，每批 ${batchSize} 个 MinerU block`)
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : '未知错误'
+        setStatus(`全文翻译失败：${message}`)
+      })
   }
 
   const startNewNoteForCurrentPdf = (): void => {
@@ -819,6 +2362,78 @@ export function App(): ReactElement {
       ...current,
       ...patch
     }))
+  }, [])
+
+  const updateTranslationSettings = useCallback((patch: Partial<PersistedTranslationSettingsState>): void => {
+    setTranslationSettings((current) => ({
+      ...current,
+      ...patch
+    }))
+  }, [])
+
+  const updateTranslationAiSettings = useCallback((patch: Partial<PersistedAiSettingsState>): void => {
+    setTranslationSettings((current) => ({
+      ...current,
+      ai: {
+        ...current.ai,
+        ...patch
+      }
+    }))
+  }, [])
+
+  const updatePptAiSettings = useCallback((patch: Partial<PersistedAiSettingsState>): void => {
+    setPptAiSettings((current) => ({
+      ...current,
+      ...patch
+    }))
+  }, [])
+
+  const updatePptGenerationSettings = useCallback((patch: Partial<PersistedPptGenerationSettingsState>): void => {
+    setPptGenerationOptions((current) => ({
+      ...current,
+      ...normalizePptGenerationOptions(patch)
+    }))
+  }, [])
+
+  const updatePdfEditorSettings = useCallback((patch: Partial<PersistedPdfEditorSettingsState>): void => {
+    setPdfEditorSettings((current) => ({
+      ...current,
+      ...normalizePdfEditorSettingsPatch(patch)
+    }))
+  }, [])
+
+  const pptToolbarSettings = useMemo<PdfPptToolbarSettings>(
+    () => ({
+      model: pptAiSettings.model,
+      reasoningEffort: pptAiSettings.reasoningEffort,
+      ...pptGenerationOptions
+    }),
+    [pptAiSettings.model, pptAiSettings.reasoningEffort, pptGenerationOptions]
+  )
+
+  const updatePptToolbarSettings = useCallback((patch: Partial<PdfPptToolbarSettings>): void => {
+    const { model, reasoningEffort, ...optionPatch } = patch
+
+    if (typeof model === 'string') {
+      setPptAiSettings((current) => ({
+        ...current,
+        model
+      }))
+    }
+
+    if (reasoningEffort) {
+      setPptAiSettings((current) => ({
+        ...current,
+        reasoningEffort
+      }))
+    }
+
+    if (Object.keys(optionPatch).length > 0) {
+      setPptGenerationOptions((current) => ({
+        ...current,
+        ...normalizePptGenerationOptions(optionPatch)
+      }))
+    }
   }, [])
 
   const updateMineruSettings = useCallback((patch: Partial<PersistedMineruSettingsState>): void => {
@@ -1401,6 +3016,15 @@ export function App(): ReactElement {
     setStatus('已打开 Graph 对应的 AI 对话')
   }
 
+  const openAiQuestionMapEditor = (): void => {
+    setIsProfileOpen(false)
+    setActiveEditor('graph')
+    setActiveView('graph')
+    setIsPrimarySidebarCollapsed(false)
+    setHiddenDockPanels((current) => current.filter((panelId) => panelId !== 'editor'))
+    setStatus('已打开 AI 问答图')
+  }
+
   const createTextTemplateNote = (filePath: string): void => {
     if (!filePath) {
       return
@@ -1429,8 +3053,9 @@ export function App(): ReactElement {
       ...current,
       [filePath]: note.id
     }))
+    setNoteEditorEngine('milkdown')
     setStatus('已创建笔记草稿，请保存或继续编辑')
-    setStatus('已创建论文笔记文字模板')
+    setStatus('已创建 Markdown 论文笔记模板')
   }
 
   const createFreeformTemplateNote = (filePath: string): void => {
@@ -1464,7 +3089,8 @@ export function App(): ReactElement {
       ...current,
       [filePath]: note.id
     }))
-    setStatus('已创建自由笔记')
+    setNoteEditorEngine('milkdown')
+    setStatus('已创建 Markdown 自由笔记')
   }
 
   const createScreenshotTemplateNote = (filePath: string): void => {
@@ -1499,8 +3125,9 @@ export function App(): ReactElement {
           ...current,
           [filePath]: note.id
         }))
+        setNoteEditorEngine('milkdown')
         setStatus(`已创建截图笔记草稿：${Math.max(0, (note.blocks.length - 1) / 2)} 个截图段`)
-        setStatus(`已生成分段截图笔记：${Math.max(0, (note.blocks.length - 1) / 2)} 个截图段`)
+        setStatus(`已生成 Markdown 分段截图笔记：${Math.max(0, (note.blocks.length - 1) / 2)} 个截图段`)
       },
       (error) => {
         const message = error instanceof Error ? error.message : '生成分段截图笔记失败'
@@ -1570,6 +3197,20 @@ export function App(): ReactElement {
           message: `已获得 ${normalizedResult.blocks.length} 个解析区域。你现在可以在菜单中生成笔记或关闭显示框。`,
           kind: 'success'
         })
+        if (pendingMindmapAfterParsePathRef.current === currentFilePath) {
+          pendingMindmapAfterParsePathRef.current = ''
+          setPendingMindmapAfterParsePath('')
+          void workbench.commands.executeCommand('mindmap.generateFromPaper', {
+            filePath: currentFilePath
+          })
+        }
+        if (pendingCodeAnalysisAfterParsePathRef.current === currentFilePath) {
+          pendingCodeAnalysisAfterParsePathRef.current = ''
+          setPendingCodeAnalysisAfterParsePath('')
+          void workbench.commands.executeCommand(codeAnalysisAnalyzeCurrentPaperCommand, {
+            filePath: currentFilePath
+          })
+        }
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : 'MinerU 解析失败'
@@ -1579,6 +3220,14 @@ export function App(): ReactElement {
           message,
           kind: 'error'
         })
+        if (pendingMindmapAfterParsePathRef.current === currentFilePath) {
+          pendingMindmapAfterParsePathRef.current = ''
+          setPendingMindmapAfterParsePath('')
+        }
+        if (pendingCodeAnalysisAfterParsePathRef.current === currentFilePath) {
+          pendingCodeAnalysisAfterParsePathRef.current = ''
+          setPendingCodeAnalysisAfterParsePath('')
+        }
       })
   }
 
@@ -1610,6 +3259,7 @@ export function App(): ReactElement {
       delete next[filePath]
       return next
     })
+    setNoteEditorEngine('milkdown')
     focusNoteBlockInPanel(filePath, note.id, note.blocks[0]?.id ?? '')
   }
 
@@ -1727,7 +3377,7 @@ export function App(): ReactElement {
         : block.type === 'list'
           ? { text: block.listItems?.join('\n') ?? text }
           : block.type === 'equation'
-            ? { latex: text }
+            ? { latex: block.text?.trim() || '' }
             : block.type === 'table'
               ? { rows: block.tableRows ?? [[text]] }
               : block.type === 'image' || block.type === 'chart'
@@ -1756,7 +3406,7 @@ export function App(): ReactElement {
     return {
       ...createdBlock,
       id: noteBlockId,
-      sourceRefs: createMineruBlockSourceRefs(noteBlockId, block, filePath, text || block.caption)
+      sourceRefs: createMineruBlockSourceRefs(noteBlockId, block, filePath, block.type === 'equation' ? block.text?.trim() || undefined : text || block.caption)
     }
   }, [mineruSettings.noteStyle])
 
@@ -1942,7 +3592,7 @@ export function App(): ReactElement {
     focusNoteBlockInPanel(region.paperPath, currentNote.id, matchedBlock.id)
   }
 
-  const handleNoteSourceJump = (filePath: string, noteId: string, blockId: string): void => {
+  const emitNoteToPdfJumpSignal = (filePath: string, noteId: string, blockId: string): void => {
     const note =
       filePath === currentPdfPath
         ? currentPdfNotes.find((currentNote) => currentNote.id === noteId)
@@ -1997,11 +3647,23 @@ export function App(): ReactElement {
     setStatus(`已跳回 PDF 第 ${region.pageNo} 页来源位置`)
   }
 
-  const handleMineruBlockDropToNote = (payload: MineruBlockDragPayload, insertAfterBlockId?: string | null): void => {
+  const handleNoteSourceJump = (filePath: string, noteId: string, blockId: string): void => {
+    void workbench.commands.executeCommand('note.jumpToSource', {
+      filePath,
+      noteId,
+      blockId
+    })
+  }
+
+  useEffect(() => {
+    noteSourceJumpHandlerRef.current = emitNoteToPdfJumpSignal
+  }, [emitNoteToPdfJumpSignal])
+
+  const handleMineruBlockDropToNote = (payload: MineruBlockDragPayload, insertAfterBlockId?: string | null): string | undefined => {
     const filePath = payload.paperPath || currentWorkspacePdfPath
     if (!filePath) {
       setStatus('请先打开一个 PDF，再拖入 MinerU 内容')
-      return
+      return undefined
     }
 
     ensurePaperOpen(filePath)
@@ -2064,6 +3726,7 @@ export function App(): ReactElement {
     showDockPanel('note')
     focusNoteBlockInPanel(filePath, updatedNote.id, insertedBlock.id)
     setStatus('已从 MinerU 解析框拖入一段笔记')
+    return insertedBlock.id
   }
 
   const handleMineruBlockDropToAi = (payload: MineruBlockDragPayload): {
@@ -2099,6 +3762,71 @@ export function App(): ReactElement {
       }
     })
     setStatus(`已保存笔记：${note.title || `${getFileStem(filePath)} Notes`}`)
+  }
+
+  const saveMilkdownNoteForPdf = (filePath: string, noteId: string, markdown: string): void => {
+    const note = getPaperNotes(notesByPaperPath, filePath).find((currentNote) => currentNote.id === noteId)
+
+    if (!note) {
+      setStatus('当前笔记不存在，无法保存 Milkdown 内容')
+      return
+    }
+
+    const nextNote = createNoteFromMilkdownMarkdown(markdown, note, {
+      noteId: note.id,
+      title: note.title,
+      template: note.template,
+      paperId: note.paperId,
+      now: new Date().toISOString()
+    })
+
+    setNotesByPaperPath((current) => ({
+      ...current,
+      [filePath]: upsertNoteForPaper(getPaperNotes(current, filePath), nextNote)
+    }))
+
+    setSavedNotesByPaperPath((current) => ({
+      ...current,
+      [filePath]: upsertNoteForPaper(getPaperNotes(current, filePath), nextNote)
+    }))
+
+    setStatus(`已保存 Markdown 笔记：${nextNote.title || `${getFileStem(filePath)} Notes`}`)
+  }
+
+  const exportMilkdownNoteForPdf = (filePath: string, noteId: string, format: NoteExportFormat, markdown: string): void => {
+    const note = getPaperNotes(notesByPaperPath, filePath).find((currentNote) => currentNote.id === noteId)
+
+    if (!note) {
+      setStatus('当前 PDF 还没有可导出的 Markdown 笔记')
+      return
+    }
+
+    const exportNoteDocument = createNoteFromMilkdownMarkdown(markdown, note, {
+      noteId: note.id,
+      title: note.title,
+      template: note.template,
+      paperId: note.paperId,
+      now: new Date().toISOString()
+    })
+
+    void window.thesisAgent
+      .exportNote({
+        format,
+        note: exportNoteDocument,
+        markdown: format === 'markdown' ? markdown : undefined
+      })
+      .then((result) => {
+        if (result.canceled) {
+          setStatus('已取消导出 Markdown 笔记')
+          return
+        }
+
+        setStatus(`已导出 Markdown 笔记为 ${getNoteExportFormatLabel(result.format)}`)
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : '未知错误'
+        setStatus(`导出 Markdown 笔记失败：${message}`)
+      })
   }
 
   const discardNoteDraft = (filePath: string, noteId: string): void => {
@@ -2692,7 +4420,7 @@ export function App(): ReactElement {
           return
         }
 
-        setStatus(`已导出笔记为 ${result.format === 'pdf' ? 'PDF' : 'Word'}`)
+        setStatus(`已导出笔记为 ${getNoteExportFormatLabel(result.format)}`)
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : '未知错误'
@@ -2716,6 +4444,15 @@ export function App(): ReactElement {
             ))}
             <button className="menu-item" type="button" title="截图到剪切板 (Alt+A)" onClick={startScreenshotCapture}>
               Selection
+            </button>
+            <button
+              className="menu-item"
+              type="button"
+              title={pptProgressDialog?.status === 'running' ? 'PPT 正在生成中' : '从当前论文生成并导出 PPT'}
+              disabled={pptProgressDialog?.status === 'running'}
+              onClick={exportCurrentPaperPpt}
+            >
+              PPT
             </button>
             <div className="menu-popover-root">
               <button
@@ -2822,12 +4559,27 @@ export function App(): ReactElement {
               <span />
             </span>
           </button>
+          <button
+            className={isSettingsOpen ? 'activity settings-activity active' : 'activity settings-activity'}
+            type="button"
+            title="设置"
+            aria-label="打开设置"
+            aria-pressed={isSettingsOpen}
+            onClick={() => {
+              setIsSettingsOpen((current) => !current)
+              setIsAiConfigOpen(false)
+              setIsAiHistoryOpen(false)
+            }}
+          >
+            <span className="codicon codicon-settings-gear" aria-hidden="true" />
+          </button>
         </aside>
 
         <WorkbenchPanelLayout
           layout={dockLayout}
           activeView={activeView}
           activeEditor={activeEditor}
+          noteEditorEngine={noteEditorEngine}
           isPrimarySidebarCollapsed={isPrimarySidebarCollapsed}
           hiddenDockPanels={hiddenDockPanels}
           libraryPdfPaths={libraryPdfPaths}
@@ -2839,6 +4591,7 @@ export function App(): ReactElement {
           pdfViewStates={pdfViewStates}
           notesByPaperPath={notesByPaperPath}
           savedNotesByPaperPath={savedNotesByPaperPath}
+          translationCompareNoteIdsByPaperPath={translationCompareNoteIdsByPaperPath}
           focusedPdfSourceRegion={focusedPdfSourceRegion}
           focusedPdfSourceRegionNonce={focusedPdfSourceRegionNonce}
           selectedNoteIdsByPaperPath={selectedNoteIdsByPaperPath}
@@ -2848,8 +4601,18 @@ export function App(): ReactElement {
           aiConversationsByPaperPath={aiConversationsByPaperPath}
           activeAiConversationIdsByPaperPath={activeAiConversationIdsByPaperPath}
           focusedAiMessageId={focusedAiMessageId}
+          mindmapsByPaperPath={mindmapsByPaperPath}
+          isMindmapGenerating={mindmapGenerationDialog?.status === 'running'}
           favoriteItemsByKey={favoriteItemsByKey}
           aiSettings={aiSettings}
+          pptSettings={pptToolbarSettings}
+          pptModelOptions={modelOptions}
+          pptReasoningOptions={reasoningOptions}
+          pdfEditorSettings={pdfEditorSettings}
+          isPptGenerating={pptProgressDialog?.status === 'running'}
+          onPptSettingsChange={updatePptToolbarSettings}
+          onGeneratePptFromPaper={exportPaperPpt}
+          pendingAiDraftRequest={pendingAiDraftRequest}
           mineruSettings={mineruSettings}
           mineruParseResultByPdfPath={mineruParseResultByPdfPath}
           mineruCacheExistsByPdfPath={mineruCacheExistsByPdfPath}
@@ -2866,7 +4629,14 @@ export function App(): ReactElement {
           onAiConversationBranch={branchAiConversationFromAnswer}
           onAiConversationRename={renameAiConversation}
           onAiConversationDelete={deleteAiConversation}
+          onPendingAiDraftRequestConsumed={(requestId) =>
+            setPendingAiDraftRequest((current) => (current?.id === requestId ? null : current))
+          }
           onAiGraphNodeSelect={openAiConversationFromGraph}
+          onGraphEditorOpen={openAiQuestionMapEditor}
+          onMindmapEditorOpen={openCurrentPaperMindmap}
+          onMindmapGenerate={generateCurrentPaperMindmap}
+          onMindmapNodeJump={jumpToMindmapNodeSource}
           onFavoriteToggle={toggleFavorite}
           onDockPanelClose={closeDockPanel}
           onLibrarySortModeChange={setLibrarySortMode}
@@ -2876,10 +4646,17 @@ export function App(): ReactElement {
           onCreatePdfNote={createWholePdfNote}
           onParseWithMineru={parseWithMineru}
           onGenerateMineruNote={generateMineruNote}
+          onOpenFullTranslation={openFullTranslationForPdf}
           onHideMineruLinkedRegions={hideMineruLinkedRegions}
           onShowMineruLinkedRegions={showMineruLinkedRegions}
           onMineruClearCurrentCache={clearMineruCacheForPdf}
           onMineruClearAllCaches={clearAllMineruCaches}
+          onQuickCommand={(command, paperPath) => {
+            void workbench.commands.executeCommand(command, {
+              filePath: paperPath,
+              paperTitle: getPdfDisplayName(paperPath, pdfDisplayNamesByPath)
+            })
+          }}
           hiddenMineruOverlayByPdfPath={hiddenMineruOverlayByPdfPath}
           linkedNoteRegions={currentPdfLinkedRegions}
           onLinkedNoteRegionSelect={handleLinkedNoteRegionSelect}
@@ -2904,7 +4681,18 @@ export function App(): ReactElement {
             setIsAiConfigOpen(false)
           }}
           onAiPopoversDismiss={closeAiPopovers}
-          onAskSelection={() => void workbench.commands.executeCommand('ai.askSelection')}
+          onAskSelection={(filePath, selection) =>
+            void workbench.commands.executeCommand('ai.askSelection', {
+              filePath,
+              selection
+            })
+          }
+          onExplainSelection={(filePath, selection) =>
+            workbench.commands.executeCommand<SelectionExplainResult>('selection.explain', {
+              filePath,
+              selection
+            })
+          }
           onMineruBlockDropToAi={handleMineruBlockDropToAi}
           onNoteCreateStart={startNewNoteForCurrentPdf}
           onNoteSelect={openNoteForPdf}
@@ -2924,6 +4712,9 @@ export function App(): ReactElement {
           onNoteSourceJump={handleNoteSourceJump}
           onNoteMarkdownCopy={copyNoteMarkdown}
           onNoteExport={exportNote}
+          onNoteMilkdownSave={saveMilkdownNoteForPdf}
+          onNoteMilkdownExport={exportMilkdownNoteForPdf}
+          onNoteEditorEngineChange={switchNoteEditorEngine}
           onNoteImagePaste={pasteImagesIntoNote}
           onNoteRestore={restoreNoteForPdf}
           onMineruBlockDropToNote={handleMineruBlockDropToNote}
@@ -3045,6 +4836,150 @@ export function App(): ReactElement {
         </div>
       ) : null}
 
+      {pptProgressDialog?.open ? (
+        <PptProgressDialog
+          dialog={pptProgressDialog}
+          onClose={closePptProgressDialog}
+          onRetry={pendingPptExportRetry ? retryPptDeckExport : undefined}
+        />
+      ) : null}
+
+      {codeAnalysisParseRequiredDialog ? (
+        <CodeAnalysisParseRequiredDialog
+          dialog={codeAnalysisParseRequiredDialog}
+          isParsing={pendingCodeAnalysisAfterParsePath === codeAnalysisParseRequiredDialog.paperPath}
+          onParse={() => {
+            pendingCodeAnalysisAfterParsePathRef.current = codeAnalysisParseRequiredDialog.paperPath
+            setPendingCodeAnalysisAfterParsePath(codeAnalysisParseRequiredDialog.paperPath)
+            parseWithMineru(codeAnalysisParseRequiredDialog.paperPath)
+            setCodeAnalysisParseRequiredDialog(null)
+          }}
+          onCancel={() => {
+            pendingCodeAnalysisAfterParsePathRef.current = ''
+            setPendingCodeAnalysisAfterParsePath('')
+            setCodeAnalysisParseRequiredDialog(null)
+          }}
+        />
+      ) : null}
+
+      {codeAnalysisDialog?.open ? (
+        <CodeAnalysisDialog
+          dialog={codeAnalysisDialog}
+          onRepositorySelect={(url) => {
+            setCodeAnalysisDialog((current) => selectCodeAnalysisRepositoryCandidate(current, url))
+          }}
+          onManualRepositoryUrlChange={(value) => {
+            setCodeAnalysisDialog((current) =>
+              current
+                ? {
+                    ...current,
+                    manualRepositoryUrl: value,
+                    manualRepositoryError: '',
+                    error: undefined,
+                    updatedAt: Date.now()
+                  }
+                : current
+            )
+          }}
+          onManualRepositoryConfirm={() => {
+            const current = codeAnalysisDialog
+            if (!current || current.isPreparingRepository) {
+              return
+            }
+
+            const manualCandidate = createManualRepositoryCandidate(current.manualRepositoryUrl)
+            if (!manualCandidate) {
+              setCodeAnalysisDialog((dialog) =>
+                dialog
+                  ? {
+                      ...dialog,
+                      manualRepositoryError: '请输入有效的 GitHub 仓库 URL，例如 https://github.com/owner/repo',
+                      updatedAt: Date.now()
+                    }
+                  : dialog
+              )
+              return
+            }
+
+            startCodeAnalysisRepositoryPreparation(current, manualCandidate)
+          }}
+          onRepositoryConfirm={() => {
+            const current = codeAnalysisDialog
+            if (!current || current.isPreparingRepository) {
+              return
+            }
+
+            const selectedCandidate = current.repositoryCandidates.find(
+              (candidate) => candidate.normalizedUrl === current.selectedRepositoryUrl
+            )
+            if (!selectedCandidate) {
+              setCodeAnalysisDialog((dialog) =>
+                dialog
+                  ? {
+                      ...dialog,
+                      manualRepositoryError: '请选择一个仓库候选，或手动输入 GitHub 仓库 URL',
+                      updatedAt: Date.now()
+                    }
+                  : dialog
+              )
+              return
+            }
+
+            startCodeAnalysisRepositoryPreparation(current, selectedCandidate)
+          }}
+          onClose={() =>
+            setCodeAnalysisDialog((current) => {
+              if (!current) {
+                return current
+              }
+
+              return current.status === 'running' ? { ...current, open: false } : null
+            })
+          }
+        />
+      ) : null}
+
+      {mindmapParseRequiredDialog ? (
+        <MindmapParseRequiredDialog
+          dialog={mindmapParseRequiredDialog}
+          isParsing={pendingMindmapAfterParsePath === mindmapParseRequiredDialog.paperPath}
+          onParse={() => {
+            pendingMindmapAfterParsePathRef.current = mindmapParseRequiredDialog.paperPath
+            setPendingMindmapAfterParsePath(mindmapParseRequiredDialog.paperPath)
+            parseWithMineru(mindmapParseRequiredDialog.paperPath)
+            setMindmapParseRequiredDialog(null)
+          }}
+          onCancel={() => setMindmapParseRequiredDialog(null)}
+        />
+      ) : null}
+
+      {mindmapGenerationDialog?.open ? (
+        <MindmapGenerationDialog dialog={mindmapGenerationDialog} onClose={closeMindmapGenerationDialog} />
+      ) : null}
+
+      {isSettingsOpen ? (
+        <AppSettingsDialog
+          section={settingsSection}
+          aiSettings={aiSettings}
+          translationSettings={translationSettings}
+          pptAiSettings={pptAiSettings}
+          pptGenerationSettings={pptGenerationOptions}
+          mineruSettings={mineruSettings}
+          pdfEditorSettings={pdfEditorSettings}
+          modelOptions={modelOptions}
+          reasoningOptions={reasoningOptions}
+          onSectionChange={setSettingsSection}
+          onClose={() => setIsSettingsOpen(false)}
+          onAiSettingsChange={updateAiSettings}
+          onTranslationSettingsChange={updateTranslationSettings}
+          onTranslationAiSettingsChange={updateTranslationAiSettings}
+          onPptAiSettingsChange={updatePptAiSettings}
+          onPptGenerationSettingsChange={updatePptGenerationSettings}
+          onMineruSettingsChange={updateMineruSettings}
+          onPdfEditorSettingsChange={updatePdfEditorSettings}
+        />
+      ) : null}
+
       <footer className={activePdfToolbar ? 'statusbar pdf-statusbar' : 'statusbar'}>
         {activePdfToolbar ? (
           <>
@@ -3156,6 +5091,1399 @@ export function App(): ReactElement {
   )
 }
 
+function createPptProgressDialogState(sourceLabel: string, message: string): PptProgressDialogState {
+  const now = Date.now()
+
+  return {
+    open: true,
+    sourceLabel,
+    status: 'running',
+    message,
+    startedAt: now,
+    updatedAt: now,
+    steps: pptProgressStepDefinitions.map((step) => ({
+      ...step,
+      state: step.id === 'collect' ? 'running' : 'pending'
+    }))
+  }
+}
+
+function createMindmapGenerationDialogState(input: {
+  paperPath: string
+  paperTitle: string
+  message: string
+  debug: MindmapGenerationDebugSnapshot
+}): MindmapGenerationDialogState {
+  const now = Date.now()
+
+  return {
+    open: true,
+    paperTitle: input.paperTitle,
+    paperPath: input.paperPath,
+    status: 'running',
+    message: input.message,
+    warnings: [],
+    steps: mindmapProgressStepDefinitions.map((step) => ({
+      ...step,
+      state: step.id === 'resolve' ? 'running' : 'pending'
+    })),
+    debug: input.debug,
+    startedAt: now,
+    updatedAt: now
+  }
+}
+
+function createCodeAnalysisDialogState(input: {
+  paperPath: string
+  paperTitle: string
+  parsedBlockCount: number
+  message: string
+  repositoryCandidates: RepositoryCandidate[]
+  repositoryDiscoveryWarnings?: string[]
+}): CodeAnalysisDialogState {
+  const now = Date.now()
+  const warnings = [...new Set(input.repositoryDiscoveryWarnings ?? [])]
+  const selectedRepositoryUrl = input.repositoryCandidates[0]?.normalizedUrl ?? ''
+
+  return {
+    open: true,
+    paperTitle: input.paperTitle,
+    paperPath: input.paperPath,
+    status: 'running',
+    message: input.message,
+    warnings,
+    steps: createCodeAnalysisSteps({
+      parsedBlockCount: input.parsedBlockCount,
+      repositoryCandidates: input.repositoryCandidates,
+      selectedRepositoryUrl,
+      confirmedRepositoryUrl: ''
+    }),
+    parsedBlockCount: input.parsedBlockCount,
+    repositoryCandidates: input.repositoryCandidates,
+    selectedRepositoryUrl,
+    confirmedRepositoryUrl: '',
+    repositoryPreparationResult: undefined,
+    isPreparingRepository: false,
+    manualRepositoryUrl: '',
+    manualRepositoryError: '',
+    startedAt: now,
+    updatedAt: now
+  }
+}
+
+function createCodeAnalysisSteps(input: {
+  parsedBlockCount: number
+  repositoryCandidates: RepositoryCandidate[]
+  selectedRepositoryUrl: string
+  confirmedRepositoryUrl: string
+  repositoryPreparationResult?: CodeRepositoryPreparationResult
+  isPreparingRepository?: boolean
+}): CodeAnalysisStep[] {
+  const candidateCount = input.repositoryCandidates.length
+  const hasConfirmedRepository = Boolean(input.confirmedRepositoryUrl)
+  const selectedCandidate = input.repositoryCandidates.find(
+    (candidate) => candidate.normalizedUrl === input.selectedRepositoryUrl
+  )
+  const repositoryPreparationResult = input.repositoryPreparationResult
+  const isPreparingRepository = Boolean(input.isPreparingRepository)
+
+  return codeAnalysisStepDefinitions.map((step) => {
+    if (step.id === 'check-paper') {
+      return {
+        ...step,
+        state: 'success',
+        detail: `已找到 MinerU 解析结果：${input.parsedBlockCount} 个解析块`
+      }
+    }
+
+    if (step.id === 'parse-paper') {
+      return {
+        ...step,
+        state: 'success',
+        detail: '已完成当前 PDF 解析状态检查'
+      }
+    }
+
+    if (step.id === 'discover-repository') {
+      return {
+        ...step,
+        state: 'success',
+        detail:
+          candidateCount > 0
+            ? `已识别到 ${candidateCount} 个 GitHub 仓库候选`
+            : '未识别到仓库链接，可以手动输入 GitHub URL'
+      }
+    }
+
+    if (step.id === 'confirm-repository') {
+      if (hasConfirmedRepository) {
+        return {
+          ...step,
+          state: 'success',
+          detail: selectedCandidate
+            ? `已确认仓库 ${selectedCandidate.owner}/${selectedCandidate.repo}`
+            : '已确认仓库 URL'
+        }
+      }
+
+      return {
+        ...step,
+        state: 'running',
+        detail: candidateCount > 0 ? '请选择论文主仓库候选并确认' : '请手动输入 GitHub 仓库 URL'
+      }
+    }
+
+    if (step.id === 'fetch-repository') {
+      if (repositoryPreparationResult) {
+        return {
+          ...step,
+          state: 'success',
+          detail: repositoryPreparationResult.reusedCache
+            ? `已复用仓库缓存 ${repositoryPreparationResult.owner}/${repositoryPreparationResult.repo}`
+            : `已拉取仓库 ${repositoryPreparationResult.owner}/${repositoryPreparationResult.repo}`
+        }
+      }
+
+      if (isPreparingRepository && hasConfirmedRepository) {
+        return {
+          ...step,
+          state: 'running',
+          detail: '正在拉取或复用仓库缓存'
+        }
+      }
+
+      return {
+        ...step,
+        state: 'pending',
+        detail: hasConfirmedRepository
+          ? '已确认仓库，等待拉取或复用本地缓存'
+          : '确认仓库后会拉取或复用本地缓存'
+      }
+    }
+
+    if (step.id === 'scan-code') {
+      if (repositoryPreparationResult) {
+        return {
+          ...step,
+          state: 'success',
+          detail: `已扫描 ${repositoryPreparationResult.fileCount} 个文件，识别到 ${repositoryPreparationResult.importantFiles.length} 个关键文件`
+        }
+      }
+
+      if (isPreparingRepository && hasConfirmedRepository) {
+        return {
+          ...step,
+          state: 'pending',
+          detail: '仓库缓存准备完成后扫描源码结构'
+        }
+      }
+
+      return {
+        ...step,
+        state: 'pending',
+        detail: '确认仓库后会扫描源码结构'
+      }
+    }
+
+    if (step.id === 'align-code') {
+      if (repositoryPreparationResult) {
+        return {
+          ...step,
+          state: 'pending',
+          detail: '下一阶段将对齐论文段落与代码位置'
+        }
+      }
+
+      return {
+        ...step,
+        state: 'pending',
+        detail: '代码扫描后将进入论文代码对齐'
+      }
+    }
+
+    if (step.id === 'generate-note') {
+      if (repositoryPreparationResult) {
+        return {
+          ...step,
+          state: 'pending',
+          detail: '下一阶段将生成 Markdown 代码分析笔记'
+        }
+      }
+
+      return {
+        ...step,
+        state: 'pending',
+        detail: '代码对齐后将生成 Markdown 分析笔记'
+      }
+    }
+
+    return {
+      ...step,
+      state: 'pending'
+    }
+  })
+}
+
+function selectCodeAnalysisRepositoryCandidate(
+  current: CodeAnalysisDialogState | null,
+  normalizedUrl: string
+): CodeAnalysisDialogState | null {
+  if (!current) {
+    return current
+  }
+
+  const selectedCandidate = current.repositoryCandidates.find((candidate) => candidate.normalizedUrl === normalizedUrl)
+  if (!selectedCandidate) {
+    return {
+      ...current,
+      manualRepositoryError: '请选择一个可用仓库候选，或手动输入 GitHub 仓库 URL',
+      updatedAt: Date.now()
+    }
+  }
+
+  return {
+    ...current,
+    status: 'running',
+    selectedRepositoryUrl: normalizedUrl,
+    confirmedRepositoryUrl: '',
+    repositoryPreparationResult: undefined,
+    isPreparingRepository: false,
+    manualRepositoryError: '',
+    error: undefined,
+    message: `已选中仓库候选 ${selectedCandidate.owner}/${selectedCandidate.repo}，请点击确认仓库`,
+    steps: createCodeAnalysisSteps({
+      parsedBlockCount: current.parsedBlockCount ?? 0,
+      repositoryCandidates: current.repositoryCandidates,
+      selectedRepositoryUrl: normalizedUrl,
+      confirmedRepositoryUrl: '',
+      repositoryPreparationResult: undefined,
+      isPreparingRepository: false
+    }),
+    updatedAt: Date.now()
+  }
+}
+
+function createCodeAnalysisRepositoryPreparationStartState(
+  current: CodeAnalysisDialogState | null,
+  candidate: RepositoryCandidate
+): CodeAnalysisDialogState | null {
+  if (!current) {
+    return current
+  }
+
+  const repositoryCandidates = upsertRepositoryCandidate(current.repositoryCandidates, candidate)
+  return {
+    ...current,
+    status: 'running',
+    repositoryCandidates,
+    selectedRepositoryUrl: candidate.normalizedUrl,
+    confirmedRepositoryUrl: candidate.normalizedUrl,
+    repositoryPreparationResult: undefined,
+    isPreparingRepository: true,
+    manualRepositoryUrl: candidate.normalizedUrl,
+    manualRepositoryError: '',
+    error: undefined,
+    message: `已确认仓库 ${candidate.owner}/${candidate.repo}，正在准备仓库缓存并扫描代码结构`,
+    steps: createCodeAnalysisSteps({
+      parsedBlockCount: current.parsedBlockCount ?? 0,
+      repositoryCandidates,
+      selectedRepositoryUrl: candidate.normalizedUrl,
+      confirmedRepositoryUrl: candidate.normalizedUrl,
+      isPreparingRepository: true
+    }),
+    updatedAt: Date.now()
+  }
+}
+
+function applyCodeAnalysisRepositoryPreparationResult(
+  current: CodeAnalysisDialogState | null,
+  result: CodeRepositoryPreparationResult
+): CodeAnalysisDialogState | null {
+  if (!current || current.confirmedRepositoryUrl !== result.normalizedUrl) {
+    return current
+  }
+
+  const warnings = uniqueStrings([...current.warnings, ...result.warnings])
+  return {
+    ...current,
+    status: 'success',
+    repositoryPreparationResult: result,
+    isPreparingRepository: false,
+    warnings,
+    error: undefined,
+    message: `仓库已准备并完成代码扫描：${result.owner}/${result.repo}`,
+    steps: createCodeAnalysisSteps({
+      parsedBlockCount: current.parsedBlockCount ?? 0,
+      repositoryCandidates: current.repositoryCandidates,
+      selectedRepositoryUrl: result.normalizedUrl,
+      confirmedRepositoryUrl: result.normalizedUrl,
+      repositoryPreparationResult: result,
+      isPreparingRepository: false
+    }),
+    updatedAt: Date.now()
+  }
+}
+
+function applyCodeAnalysisRepositoryPreparationError(
+  current: CodeAnalysisDialogState | null,
+  repositoryUrl: string,
+  message: string
+): CodeAnalysisDialogState | null {
+  if (!current || current.confirmedRepositoryUrl !== repositoryUrl) {
+    return current
+  }
+
+  const hasRunningRepositoryStep = current.steps.some(
+    (step) => (step.id === 'fetch-repository' || step.id === 'scan-code') && step.state === 'running'
+  )
+  const steps = current.steps.map((step) => {
+    if (step.id === 'fetch-repository' || step.id === 'scan-code') {
+      if (step.state === 'running' || (!hasRunningRepositoryStep && step.id === 'fetch-repository')) {
+        return {
+          ...step,
+          state: 'error' as const,
+          detail: message
+        }
+      }
+    }
+
+    return step
+  })
+
+  return {
+    ...current,
+    status: 'error',
+    isPreparingRepository: false,
+    error: message,
+    message: '仓库准备失败，请检查 Git、网络或仓库 URL 后重试',
+    steps,
+    updatedAt: Date.now()
+  }
+}
+
+function upsertRepositoryCandidate(candidates: RepositoryCandidate[], nextCandidate: RepositoryCandidate): RepositoryCandidate[] {
+  const withoutCurrent = candidates.filter((candidate) => candidate.normalizedUrl !== nextCandidate.normalizedUrl)
+  return [nextCandidate, ...withoutCurrent]
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))]
+}
+
+function updateMindmapGenerationStep(
+  current: MindmapGenerationDialogState | null,
+  stepId: MindmapProgressStepId,
+  state: PptProgressStepState,
+  detail?: string
+): MindmapGenerationDialogState | null {
+  if (!current) {
+    return current
+  }
+
+  return {
+    ...current,
+    updatedAt: Date.now(),
+    steps: current.steps.map((step) => (step.id === stepId ? { ...step, state, detail } : step))
+  }
+}
+
+function finishMindmapGenerationDialog(
+  current: MindmapGenerationDialogState | null,
+  nextStatus: MindmapGenerationDialogState['status'],
+  message: string,
+  error?: string
+): MindmapGenerationDialogState | null {
+  if (!current) {
+    return current
+  }
+
+  return {
+    ...current,
+    open: true,
+    status: nextStatus,
+    message,
+    error,
+    updatedAt: Date.now(),
+    steps: current.steps.map((step) => {
+      if (nextStatus === 'success') {
+        if (step.id === 'persist') {
+          return { ...step, state: 'success', detail: message }
+        }
+
+        if (step.state === 'running') {
+          return { ...step, state: 'success', detail: message }
+        }
+      }
+
+      if (nextStatus === 'error' && step.state === 'running') {
+        return { ...step, state: 'error', detail: error ?? message }
+      }
+
+      return step
+    })
+  }
+}
+
+function describeMindmapProgressDialogSnapshot(snapshot: MindmapGenerationDebugSnapshot): string {
+  const parts = [
+    snapshot.parsedBlockCount != null ? `${snapshot.parsedBlockCount} 个解析块` : '',
+    snapshot.sourceCharCount != null ? `${snapshot.sourceCharCount} 字符来源` : '',
+    snapshot.promptCharCount != null ? `${snapshot.promptCharCount} 字符 Prompt` : '',
+    snapshot.outputCharCount != null ? `${snapshot.outputCharCount} 字符输出` : '',
+    snapshot.nodeCount != null ? `${snapshot.nodeCount} 个节点` : '',
+    snapshot.maxDepth != null ? `最大 ${snapshot.maxDepth} 层` : ''
+  ].filter(Boolean)
+
+  return parts.length > 0 ? parts.join('、') : '暂无调试信息'
+}
+
+function buildMindmapPreviewText(input: string, maxLength = 480): string {
+  const normalized = input.trim().replace(/\s+\n/g, '\n').replace(/\n{3,}/g, '\n\n')
+  if (normalized.length <= maxLength) {
+    return normalized
+  }
+
+  return `${normalized.slice(0, maxLength)}…`
+}
+
+function describePptMaterials(materials: GenerateDeckSpecInput['materials']): string {
+  const parts = [
+    materials.excerpts?.length ? `${materials.excerpts.length} 段 PDF/选区文本` : '',
+    materials.notes?.length ? `${materials.notes.length} 条笔记` : '',
+    materials.aiAnswers?.length ? `${materials.aiAnswers.length} 条 AI 回答` : '',
+    materials.references?.length ? `${materials.references.length} 条参考文献` : '',
+    materials.assets?.length ? `${materials.assets.length} 个图片资产` : ''
+  ].filter(Boolean)
+  const paperHint = materials.paper?.abstract ? '含论文摘要' : materials.paper ? '含论文标题' : ''
+
+  if (parts.length > 0) {
+    return `已整理 ${parts.join('、')}${paperHint ? `，${paperHint}` : ''}`
+  }
+
+  return paperHint || '已整理可用材料'
+}
+
+function describePptGeneration(generated: GenerateDeckSpecResult): string {
+  const slideCount = generated.deck.slides.length
+  const warningText = generated.warnings.length > 0 ? `，${generated.warnings.length} 条内容提示` : ''
+
+  return `已生成 ${slideCount} 页 DeckSpec${warningText}`
+}
+
+function describePptExportResult(
+  generated: GenerateDeckSpecResult,
+  auditIssues: Array<{ severity: string }>
+): string {
+  const auditWarningCount = auditIssues.filter((issue) => issue.severity !== 'info').length
+  const warningCount = auditWarningCount + generated.warnings.length
+
+  return warningCount > 0 ? `PPTX 已保存，含 ${warningCount} 条提示` : 'PPTX 已保存'
+}
+
+function normalizePptGenerationOptions(patch: Partial<PptGenerationOptions>): Partial<PptGenerationOptions> {
+  const normalized: Partial<PptGenerationOptions> = {}
+
+  if (typeof patch.targetSlideCount === 'number' && Number.isFinite(patch.targetSlideCount)) {
+    normalized.targetSlideCount = Math.min(12, Math.max(8, Math.round(patch.targetSlideCount)))
+  }
+
+  if (typeof patch.includeAgenda === 'boolean') {
+    normalized.includeAgenda = patch.includeAgenda
+  }
+
+  if (typeof patch.includeReferences === 'boolean') {
+    normalized.includeReferences = patch.includeReferences
+  }
+
+  if (typeof patch.includeAppendix === 'boolean') {
+    normalized.includeAppendix = patch.includeAppendix
+  }
+
+  if (typeof patch.includeNotes === 'boolean') {
+    normalized.includeNotes = patch.includeNotes
+  }
+
+  if (typeof patch.includeAiAnswers === 'boolean') {
+    normalized.includeAiAnswers = patch.includeAiAnswers
+  }
+
+  return normalized
+}
+
+function normalizePdfEditorSettingsPatch(
+  patch: Partial<PersistedPdfEditorSettingsState>
+): Partial<PersistedPdfEditorSettingsState> {
+  const normalized: Partial<PersistedPdfEditorSettingsState> = {}
+
+  if (patch.defaultTool === 'select' || patch.defaultTool === 'highlight') {
+    normalized.defaultTool = patch.defaultTool
+  }
+
+  if (patch.defaultBrowseMode === 'page' || patch.defaultBrowseMode === 'scroll') {
+    normalized.defaultBrowseMode = patch.defaultBrowseMode
+  }
+
+  if (patch.defaultRenderMode === 'compatibility' || patch.defaultRenderMode === 'pdfjs') {
+    normalized.defaultRenderMode = patch.defaultRenderMode
+  }
+
+  if (typeof patch.defaultScale === 'number' && Number.isFinite(patch.defaultScale)) {
+    normalized.defaultScale = Math.min(3, Math.max(0.5, Number(patch.defaultScale.toFixed(2))))
+  }
+
+  if (typeof patch.showSelectionPopover === 'boolean') {
+    normalized.showSelectionPopover = patch.showSelectionPopover
+  }
+
+  return normalized
+}
+
+function mergePersistedAiSettings(
+  input: Partial<PersistedAiSettingsState> | undefined,
+  fallback: PersistedAiSettingsState
+): PersistedAiSettingsState {
+  const value = input ?? {}
+
+  return {
+    providerId: typeof value.providerId === 'string' && value.providerId.trim() ? value.providerId.trim() : fallback.providerId,
+    baseUrl: typeof value.baseUrl === 'string' && value.baseUrl.trim() ? value.baseUrl.trim() : fallback.baseUrl,
+    model: typeof value.model === 'string' && value.model.trim() ? value.model.trim() : fallback.model,
+    reasoningEffort: isReasoningEffortValue(value.reasoningEffort) ? value.reasoningEffort : fallback.reasoningEffort,
+    disableResponseStorage:
+      typeof value.disableResponseStorage === 'boolean' ? value.disableResponseStorage : fallback.disableResponseStorage,
+    requiresOpenAiAuth: typeof value.requiresOpenAiAuth === 'boolean' ? value.requiresOpenAiAuth : fallback.requiresOpenAiAuth,
+    systemPrompt: typeof value.systemPrompt === 'string' && value.systemPrompt.trim() ? value.systemPrompt : fallback.systemPrompt,
+    apiKey: typeof value.apiKey === 'string' ? value.apiKey : fallback.apiKey
+  }
+}
+
+function resolveAiSettingsWithSharedKey(
+  settings: PersistedAiSettingsState,
+  sharedSettings: PersistedAiSettingsState
+): PersistedAiSettingsState {
+  return {
+    ...settings,
+    apiKey: settings.apiKey.trim() || sharedSettings.apiKey.trim()
+  }
+}
+
+function normalizePersistedAppSettings(
+  input: PersistedAppSettingsState | undefined,
+  fallbackAiSettings: PersistedAiSettingsState
+): PersistedAppSettingsState {
+  const translationFallback: PersistedTranslationSettingsState = {
+    ...defaultTranslationSettings,
+    ai: {
+      ...fallbackAiSettings,
+      model: defaultTranslationSettings.ai.model,
+      reasoningEffort: defaultTranslationSettings.ai.reasoningEffort,
+      apiKey: defaultTranslationSettings.ai.apiKey
+    }
+  }
+  const pptAiFallback: PersistedAiSettingsState = {
+    ...fallbackAiSettings,
+    model: defaultPptAiSettings.model,
+    reasoningEffort: defaultPptAiSettings.reasoningEffort,
+    apiKey: defaultPptAiSettings.apiKey
+  }
+
+  return {
+    translation: {
+      targetLanguage:
+        typeof input?.translation?.targetLanguage === 'string' && input.translation.targetLanguage.trim()
+          ? input.translation.targetLanguage.trim()
+          : translationFallback.targetLanguage,
+      dictionaryEnabled:
+        typeof input?.translation?.dictionaryEnabled === 'boolean'
+          ? input.translation.dictionaryEnabled
+          : translationFallback.dictionaryEnabled,
+      fullTextBatchSize:
+        typeof input?.translation?.fullTextBatchSize === 'number' && Number.isFinite(input.translation.fullTextBatchSize)
+          ? Math.min(10, Math.max(1, Math.round(input.translation.fullTextBatchSize)))
+          : translationFallback.fullTextBatchSize,
+      ai: mergePersistedAiSettings(input?.translation?.ai, translationFallback.ai)
+    },
+    pptAi: mergePersistedAiSettings(input?.pptAi, pptAiFallback),
+    pptGeneration: {
+      ...defaultPptGenerationSettings,
+      ...normalizePptGenerationOptions(input?.pptGeneration ?? {})
+    },
+    pdfEditor: {
+      ...defaultPdfEditorSettings,
+      ...normalizePdfEditorSettingsPatch(input?.pdfEditor ?? {})
+    }
+  }
+}
+
+function isReasoningEffortValue(input: unknown): input is ReasoningEffort {
+  return input === 'none' || input === 'minimal' || input === 'low' || input === 'medium' || input === 'high' || input === 'xhigh'
+}
+
+function buildPptIntentOverrides(options: PptGenerationOptions): NonNullable<GenerateDeckSpecInput['intent']> {
+  return {
+    targetSlideCount: options.targetSlideCount,
+    includeAgenda: options.includeAgenda,
+    includeReferences: options.includeReferences,
+    includeAppendix: options.includeAppendix
+  }
+}
+
+function applyPptGenerationOptions(
+  materials: GenerateDeckSpecInput['materials'],
+  options: PptGenerationOptions
+): GenerateDeckSpecInput['materials'] {
+  return {
+    ...materials,
+    notes: options.includeNotes ? materials.notes : [],
+    aiAnswers: options.includeAiAnswers ? materials.aiAnswers : []
+  }
+}
+
+function PptProgressDialog({
+  dialog,
+  onClose,
+  onRetry
+}: {
+  dialog: PptProgressDialogState
+  onClose: () => void
+  onRetry?: () => void
+}): ReactElement {
+  const statusLabel = getPptProgressStatusLabel(dialog.status)
+  const closeLabel = dialog.status === 'running' ? '后台继续' : '关闭'
+  const canRetry = dialog.status === 'error' && typeof onRetry === 'function'
+
+  return (
+    <div className="modal-backdrop ppt-progress-backdrop" role="presentation">
+      <section
+        className={`confirm-modal ppt-progress-modal ${dialog.status}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ppt-progress-dialog-title"
+        aria-describedby="ppt-progress-dialog-message"
+      >
+        <div className="ppt-progress-header">
+          <div>
+            <span className="ppt-progress-eyebrow">PPT 生成任务</span>
+            <h2 id="ppt-progress-dialog-title">正在生成演示文稿</h2>
+          </div>
+          <span className={`ppt-progress-status ${dialog.status}`} aria-live="polite">
+            <span className={`codicon ${getPptProgressStatusIcon(dialog.status)}`} aria-hidden="true" />
+            {statusLabel}
+          </span>
+        </div>
+
+        <p className="ppt-progress-source" title={dialog.sourceLabel}>
+          {dialog.sourceLabel}
+        </p>
+        <p className="ppt-progress-message" id="ppt-progress-dialog-message" aria-live="polite">
+          {dialog.message}
+        </p>
+
+        <ol className="ppt-progress-steps">
+          {dialog.steps.map((step) => (
+            <li key={step.id} className={`ppt-progress-step ${step.state}`}>
+              <span className="ppt-progress-step-icon" aria-hidden="true">
+                <span className={`codicon ${getPptProgressStepIcon(step.state)}`} />
+              </span>
+              <span className="ppt-progress-step-body">
+                <span className="ppt-progress-step-label">{step.label}</span>
+                {step.detail ? <span className="ppt-progress-step-detail">{step.detail}</span> : null}
+              </span>
+            </li>
+          ))}
+        </ol>
+
+        {dialog.error ? <pre className="ppt-progress-error">{dialog.error}</pre> : null}
+        {dialog.status === 'running' ? <p className="ppt-progress-hint">关闭窗口后任务会继续执行，完成或失败时会再次显示结果。</p> : null}
+
+        <div className="confirm-modal-actions">
+          {canRetry ? (
+            <button className="note-toolbar-button" type="button" onClick={onRetry}>
+              重试保存
+            </button>
+          ) : null}
+          <button className="note-toolbar-button" type="button" onClick={onClose}>
+            {closeLabel}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function getPptProgressStatusLabel(status: PptProgressDialogState['status']): string {
+  if (status === 'success') {
+    return '已完成'
+  }
+
+  if (status === 'error') {
+    return '失败'
+  }
+
+  if (status === 'canceled') {
+    return '已取消'
+  }
+
+  return '进行中'
+}
+
+function getPptProgressStatusIcon(status: PptProgressDialogState['status']): string {
+  if (status === 'success') {
+    return 'codicon-check'
+  }
+
+  if (status === 'error') {
+    return 'codicon-error'
+  }
+
+  if (status === 'canceled') {
+    return 'codicon-circle-slash'
+  }
+
+  return 'codicon-loading'
+}
+
+function getPptProgressStepIcon(state: PptProgressStepState): string {
+  if (state === 'success') {
+    return 'codicon-check'
+  }
+
+  if (state === 'error') {
+    return 'codicon-error'
+  }
+
+  if (state === 'canceled') {
+    return 'codicon-circle-slash'
+  }
+
+  if (state === 'running') {
+    return 'codicon-loading'
+  }
+
+  return 'codicon-circle-large-outline'
+}
+
+function MindmapParseRequiredDialog({
+  dialog,
+  isParsing,
+  onParse,
+  onCancel
+}: {
+  dialog: MindmapParseRequiredDialogState
+  isParsing: boolean
+  onParse: () => void
+  onCancel: () => void
+}): ReactElement {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="confirm-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mindmap-parse-required-title"
+        aria-describedby="mindmap-parse-required-message"
+      >
+        <span className="codicon codicon-type-hierarchy-sub" aria-hidden="true" />
+        <h2 id="mindmap-parse-required-title">生成脑图前需要解析 PDF</h2>
+        <p id="mindmap-parse-required-message">
+          {dialog.paperTitle || '当前论文'} 还没有可用于脑图生成的 MinerU 解析结果。先解析后，我会继续使用结构化内容生成
+          markmap 脑图。
+        </p>
+        <p className="mindmap-parse-required-path" title={dialog.paperPath}>
+          {dialog.paperPath}
+        </p>
+        <div className="confirm-modal-actions">
+          <button className="note-toolbar-button" type="button" onClick={onParse} disabled={isParsing}>
+            {isParsing ? '解析中...' : '先解析 PDF'}
+          </button>
+          <button className="note-toolbar-button" type="button" onClick={onCancel}>
+            取消
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function MindmapGenerationDialog({
+  dialog,
+  onClose
+}: {
+  dialog: MindmapGenerationDialogState
+  onClose: () => void
+}): ReactElement {
+  const statusLabel = getMindmapGenerationStatusLabel(dialog.status)
+  const closeLabel = dialog.status === 'running' ? '后台继续' : '关闭'
+  const debugSummary = describeMindmapProgressDialogSnapshot(dialog.debug)
+  const currentStep = dialog.steps.find((step) => step.state === 'running') ?? dialog.steps.at(-1)
+
+  return (
+    <div className="modal-backdrop ppt-progress-backdrop" role="presentation">
+      <section
+        className={`confirm-modal ppt-progress-modal mindmap-progress-modal ${dialog.status}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mindmap-generation-dialog-title"
+        aria-describedby="mindmap-generation-dialog-message"
+      >
+        <div className="ppt-progress-header">
+          <div>
+            <span className="ppt-progress-eyebrow">论文脑图任务</span>
+            <h2 id="mindmap-generation-dialog-title">生成 markmap 脑图</h2>
+          </div>
+          <span className={`ppt-progress-status ${dialog.status}`} aria-live="polite">
+            <span className={`codicon ${getMindmapGenerationStatusIcon(dialog.status)}`} aria-hidden="true" />
+            {statusLabel}
+          </span>
+        </div>
+        <p className="ppt-progress-source" title={dialog.paperTitle}>
+          {dialog.paperTitle}
+        </p>
+        <p className="mindmap-progress-path" title={dialog.paperPath}>
+          {dialog.paperPath}
+        </p>
+        <p className="ppt-progress-message" id="mindmap-generation-dialog-message" aria-live="polite">
+          {dialog.message}
+        </p>
+
+        <div className="mindmap-progress-body">
+          <div className="mindmap-progress-primary">
+            <div className="mindmap-progress-current" aria-label="当前脑图生成步骤">
+              <span>当前步骤</span>
+              <strong>{currentStep?.label ?? '未知'}</strong>
+              <small>{currentStep?.detail || '等待下一步调试信息'}</small>
+            </div>
+
+            <ol className="ppt-progress-steps mindmap-progress-steps">
+              {dialog.steps.map((step) => (
+                <li key={step.id} className={`ppt-progress-step ${step.state}`}>
+                  <span className="ppt-progress-step-icon" aria-hidden="true">
+                    <span className={`codicon ${getPptProgressStepIcon(step.state)}`} />
+                  </span>
+                  <span className="ppt-progress-step-body">
+                    <span className="ppt-progress-step-label">{step.label}</span>
+                    {step.detail ? <span className="ppt-progress-step-detail">{step.detail}</span> : null}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="mindmap-progress-secondary">
+            <div className="mindmap-progress-metrics" aria-label="脑图调试快照">
+              <div className="mindmap-progress-metric">
+                <span>调试摘要</span>
+                <strong>{debugSummary}</strong>
+                <small>模型：{dialog.debug.modelLabel}</small>
+              </div>
+              <div className="mindmap-progress-metric">
+                <span>解析块</span>
+                <strong>{dialog.debug.parsedBlockCount ?? '未读取'}</strong>
+                <small>{dialog.debug.sourceCharCount != null ? `来源 ${dialog.debug.sourceCharCount} 字符` : '等待来源整理'}</small>
+              </div>
+              <div className="mindmap-progress-metric">
+                <span>生成结果</span>
+                <strong>{dialog.debug.nodeCount != null ? `${dialog.debug.nodeCount} 个节点` : '等待 AI 输出'}</strong>
+                <small>{dialog.debug.maxDepth != null ? `最大 ${dialog.debug.maxDepth} 层` : '尚未审计'}</small>
+              </div>
+            </div>
+
+            {dialog.debug.sourceWarnings.length > 0 ? (
+              <div className="mindmap-progress-warning-block">
+                <span className="mindmap-progress-warning-title">来源 warning</span>
+                <ul>
+                  {dialog.debug.sourceWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {dialog.debug.auditWarnings.length > 0 ? (
+              <div className="mindmap-progress-warning-block">
+                <span className="mindmap-progress-warning-title">审计 warning</span>
+                <ul>
+                  {dialog.debug.auditWarnings.map((warning) => (
+                    <li key={warning}>{warning}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            <div className="mindmap-progress-previews">
+              <details open>
+                <summary>来源预览</summary>
+                <pre>{dialog.debug.sourcePreview || '暂无来源预览'}</pre>
+              </details>
+              <details>
+                <summary>Prompt 预览</summary>
+                <pre>{dialog.debug.promptPreview || '暂无 Prompt 预览'}</pre>
+              </details>
+              <details>
+                <summary>AI 输出预览</summary>
+                <pre>{dialog.debug.outputPreview || '暂无 AI 输出预览'}</pre>
+              </details>
+            </div>
+          </div>
+        </div>
+
+        {dialog.warnings.length > 0 ? <pre className="ppt-progress-error">{dialog.warnings.join('\n')}</pre> : null}
+        {dialog.error ? <pre className="ppt-progress-error">{dialog.error}</pre> : null}
+        {dialog.status === 'running' ? <p className="ppt-progress-hint">关闭窗口后任务会继续执行，完成或失败时会再次显示结果。</p> : null}
+        <div className="confirm-modal-actions">
+          <button className="note-toolbar-button" type="button" onClick={onClose}>
+            {closeLabel}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function CodeAnalysisParseRequiredDialog({
+  dialog,
+  isParsing,
+  onParse,
+  onCancel
+}: {
+  dialog: CodeAnalysisParseRequiredDialogState
+  isParsing: boolean
+  onParse: () => void
+  onCancel: () => void
+}): ReactElement {
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section
+        className="confirm-modal code-analysis-parse-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="code-analysis-parse-required-title"
+        aria-describedby="code-analysis-parse-required-message"
+      >
+        <span className="codicon codicon-code" aria-hidden="true" />
+        <h2 id="code-analysis-parse-required-title">代码解析前需要先解析 PDF</h2>
+        <p id="code-analysis-parse-required-message">
+          {dialog.paperTitle || '当前论文'} 还没有可用于代码解析的 MinerU 结果。先解析后，我会继续识别仓库并生成代码分析笔记。
+        </p>
+        <p className="mindmap-parse-required-path" title={dialog.paperPath}>
+          {dialog.paperPath}
+        </p>
+        <div className="confirm-modal-actions">
+          <button className="note-toolbar-button" type="button" onClick={onParse} disabled={isParsing}>
+            {isParsing ? '解析中...' : '先解析 PDF'}
+          </button>
+          <button className="note-toolbar-button" type="button" onClick={onCancel}>
+            取消
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function CodeAnalysisDialog({
+  dialog,
+  onRepositorySelect,
+  onManualRepositoryUrlChange,
+  onManualRepositoryConfirm,
+  onRepositoryConfirm,
+  onClose
+}: {
+  dialog: CodeAnalysisDialogState
+  onRepositorySelect: (url: string) => void
+  onManualRepositoryUrlChange: (value: string) => void
+  onManualRepositoryConfirm: () => void
+  onRepositoryConfirm: () => void
+  onClose: () => void
+}): ReactElement {
+  const statusLabel = getCodeAnalysisStatusLabel(dialog.status)
+  const closeLabel = dialog.status === 'running' ? '收起' : '关闭'
+  const currentStep =
+    dialog.steps.find((step) => step.state === 'error') ??
+    dialog.steps.find((step) => step.state === 'running') ??
+    (dialog.status === 'success' ? [...dialog.steps].reverse().find((step) => step.state === 'success') : undefined) ??
+    dialog.steps.find((step) => step.state === 'pending') ??
+    dialog.steps.at(-1)
+  const selectedCandidate = dialog.repositoryCandidates.find(
+    (candidate) => candidate.normalizedUrl === dialog.selectedRepositoryUrl
+  )
+  const confirmedCandidate = dialog.repositoryCandidates.find(
+    (candidate) => candidate.normalizedUrl === dialog.confirmedRepositoryUrl
+  )
+  const canConfirmSelectedCandidate =
+    !dialog.isPreparingRepository &&
+    Boolean(selectedCandidate) &&
+    (dialog.confirmedRepositoryUrl !== selectedCandidate?.normalizedUrl || dialog.status === 'error')
+  const repositoryPreparationResult = dialog.repositoryPreparationResult
+  const languageEntries = repositoryPreparationResult
+    ? Object.entries(repositoryPreparationResult.languageCounts).slice(0, 8)
+    : []
+  const importantFiles = repositoryPreparationResult?.importantFiles.slice(0, 12) ?? []
+
+  return (
+    <div className="modal-backdrop ppt-progress-backdrop" role="presentation">
+      <section
+        className={`confirm-modal ppt-progress-modal code-analysis-progress-modal ${dialog.status}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="code-analysis-dialog-title"
+        aria-describedby="code-analysis-dialog-message"
+      >
+        <div className="ppt-progress-header">
+          <div>
+            <span className="ppt-progress-eyebrow">代码解析任务</span>
+            <h2 id="code-analysis-dialog-title">论文代码对应分析</h2>
+          </div>
+          <span className={`ppt-progress-status ${dialog.status}`} aria-live="polite">
+            <span className={`codicon ${getCodeAnalysisStatusIcon(dialog.status)}`} aria-hidden="true" />
+            {statusLabel}
+          </span>
+        </div>
+        <p className="ppt-progress-source" title={dialog.paperTitle}>
+          {dialog.paperTitle}
+        </p>
+        <p className="mindmap-progress-path" title={dialog.paperPath}>
+          {dialog.paperPath}
+        </p>
+        <p className="ppt-progress-message" id="code-analysis-dialog-message" aria-live="polite">
+          {dialog.message}
+        </p>
+
+        <div className="mindmap-progress-body">
+          <div className="mindmap-progress-primary">
+            <div className="mindmap-progress-current" aria-label="当前代码解析步骤">
+              <span>当前步骤</span>
+              <strong>{currentStep?.label ?? '未知'}</strong>
+              <small>{currentStep?.detail || '等待下一步调试信息'}</small>
+            </div>
+            <ol className="ppt-progress-steps mindmap-progress-steps">
+              {dialog.steps.map((step) => (
+                <li key={step.id} className={`ppt-progress-step ${step.state}`}>
+                  <span className="ppt-progress-step-icon" aria-hidden="true">
+                    <span className={`codicon ${getPptProgressStepIcon(step.state)}`} />
+                  </span>
+                  <span className="ppt-progress-step-body">
+                    <span className="ppt-progress-step-label">{step.label}</span>
+                    {step.detail ? <span className="ppt-progress-step-detail">{step.detail}</span> : null}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="mindmap-progress-secondary">
+            <div className="mindmap-progress-metrics" aria-label="代码解析摘要">
+              <div className="mindmap-progress-metric">
+                <span>解析块</span>
+                <strong>{dialog.parsedBlockCount}</strong>
+                <small>已确认当前 PDF 存在 MinerU 解析结果</small>
+              </div>
+              <div className="mindmap-progress-metric">
+                <span>仓库候选</span>
+                <strong>{dialog.repositoryCandidates.length > 0 ? `${dialog.repositoryCandidates.length} 个` : '无自动候选'}</strong>
+                <small>{selectedCandidate ? `当前选择：${selectedCandidate.owner}/${selectedCandidate.repo}` : '等待手动输入'}</small>
+              </div>
+              <div className="mindmap-progress-metric">
+                <span>阶段进度</span>
+                <strong>{dialog.confirmedRepositoryUrl ? 'Phase 3' : 'Phase 2'}</strong>
+                <small>
+                  {repositoryPreparationResult
+                    ? '仓库缓存与源码扫描已完成'
+                    : confirmedCandidate
+                      ? `已确认：${confirmedCandidate.owner}/${confirmedCandidate.repo}`
+                      : '等待确认仓库'}
+                </small>
+              </div>
+            </div>
+
+            {repositoryPreparationResult ? (
+              <div className="code-analysis-scan-summary" aria-label="仓库扫描摘要">
+                <div className="code-analysis-section-title">
+                  <span>代码扫描摘要</span>
+                  <small>{repositoryPreparationResult.reusedCache ? '复用本地缓存' : '新拉取仓库'}</small>
+                </div>
+                <div className="code-analysis-scan-grid">
+                  <div>
+                    <span>仓库</span>
+                    <strong>{repositoryPreparationResult.owner}/{repositoryPreparationResult.repo}</strong>
+                  </div>
+                  <div>
+                    <span>版本</span>
+                    <strong>{repositoryPreparationResult.commit ?? '未知'}</strong>
+                    <small>{repositoryPreparationResult.branch ?? '未识别分支'}</small>
+                  </div>
+                  <div>
+                    <span>文件数</span>
+                    <strong>{repositoryPreparationResult.fileCount}</strong>
+                    <small>{repositoryPreparationResult.scanLimitReached ? `已达到 ${repositoryPreparationResult.maxFiles} 文件上限` : '扫描未触发上限'}</small>
+                  </div>
+                </div>
+                {languageEntries.length > 0 ? (
+                  <div className="code-analysis-language-list" aria-label="语言统计">
+                    {languageEntries.map(([language, count]) => (
+                      <span key={language}>
+                        <strong>{language}</strong>
+                        {count}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                {importantFiles.length > 0 ? (
+                  <ol className="code-analysis-file-list" aria-label="关键文件">
+                    {importantFiles.map((file) => (
+                      <li key={`${file.kind}:${file.path}`}>
+                        <span className="codicon codicon-file-code" aria-hidden="true" />
+                        <span title={file.path}>{file.path}</span>
+                        <small>{getCodeRepositoryImportantFileKindLabel(file.kind)}</small>
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className="code-analysis-repository-panel" aria-label="GitHub 仓库候选">
+              <div className="code-analysis-section-title">
+                <span>GitHub 仓库候选</span>
+                <small>{dialog.repositoryCandidates.length > 0 ? '从 MinerU Markdown 与 block 文本中识别' : '未找到自动候选'}</small>
+              </div>
+
+              {dialog.repositoryCandidates.length > 0 ? (
+                <ol className="code-analysis-candidate-list">
+                  {dialog.repositoryCandidates.map((candidate) => {
+                    const isSelected = dialog.selectedRepositoryUrl === candidate.normalizedUrl
+                    const isConfirmed = dialog.confirmedRepositoryUrl === candidate.normalizedUrl
+
+                    return (
+                      <li key={candidate.id}>
+                        <button
+                          className={`code-analysis-candidate${isSelected ? ' selected' : ''}${isConfirmed ? ' confirmed' : ''}`}
+                          type="button"
+                          aria-pressed={isSelected}
+                          disabled={dialog.isPreparingRepository}
+                          onClick={() => onRepositorySelect(candidate.normalizedUrl)}
+                        >
+                          <span className="code-analysis-candidate-head">
+                            <span className={`codicon ${isConfirmed ? 'codicon-check' : 'codicon-repo'}`} aria-hidden="true" />
+                            <strong>{candidate.owner}/{candidate.repo}</strong>
+                            <span className={`code-analysis-confidence ${candidate.confidence}`}>
+                              {getRepositoryCandidateConfidenceLabel(candidate.confidence)}
+                            </span>
+                          </span>
+                          <span className="code-analysis-candidate-url">{candidate.normalizedUrl}</span>
+                          <span className="code-analysis-candidate-meta">
+                            <span>{getRepositoryCandidateSourceLabel(candidate.source)}</span>
+                            <span>分数 {candidate.score}</span>
+                            <span>命中 {candidate.occurrenceCount} 次</span>
+                            {candidate.pageNo ? <span>第 {candidate.pageNo} 页</span> : null}
+                          </span>
+                          <span className="code-analysis-candidate-reason">{candidate.reason}</span>
+                          <span className="code-analysis-candidate-context">
+                            {candidate.context || 'MinerU 解析中没有提供更多上下文'}
+                          </span>
+                          {candidate.warnings.length > 0 ? (
+                            <span className="code-analysis-candidate-warning">{candidate.warnings[0]}</span>
+                          ) : null}
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ol>
+              ) : (
+                <p className="code-analysis-empty">
+                  MinerU 解析文本里没有发现 GitHub 仓库链接。可以直接输入论文主页、README 或仓库根链接。
+                </p>
+              )}
+            </div>
+
+            <div className="code-analysis-manual">
+              <label htmlFor="code-analysis-manual-url">手动输入 GitHub 仓库 URL</label>
+              <div className="code-analysis-manual-row">
+                <input
+                  id="code-analysis-manual-url"
+                  className="code-analysis-manual-input"
+                  type="url"
+                  value={dialog.manualRepositoryUrl}
+                  placeholder="https://github.com/owner/repo"
+                  disabled={dialog.isPreparingRepository}
+                  onChange={(event) => onManualRepositoryUrlChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault()
+                      onManualRepositoryConfirm()
+                    }
+                  }}
+                />
+                <button
+                  className="note-toolbar-button code-analysis-use-button"
+                  type="button"
+                  disabled={dialog.isPreparingRepository || !dialog.manualRepositoryUrl.trim()}
+                  onClick={onManualRepositoryConfirm}
+                >
+                  <span className="codicon codicon-check" aria-hidden="true" />
+                  使用此仓库
+                </button>
+              </div>
+              {dialog.manualRepositoryError ? (
+                <p className="code-analysis-manual-error" role="alert">
+                  {dialog.manualRepositoryError}
+                </p>
+              ) : null}
+              {dialog.confirmedRepositoryUrl ? (
+                <p className="code-analysis-confirmed" title={dialog.confirmedRepositoryUrl}>
+                  已确认：{dialog.confirmedRepositoryUrl}
+                </p>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        {dialog.warnings.length > 0 ? (
+          <div className="mindmap-progress-warning-block code-analysis-warning-block">
+            <span className="mindmap-progress-warning-title">流程提示</span>
+            <ul>
+              {dialog.warnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        {dialog.error ? <pre className="ppt-progress-error">{dialog.error}</pre> : null}
+        {dialog.status === 'running' ? (
+          <p className="ppt-progress-hint">
+            {dialog.isPreparingRepository
+              ? '仓库准备在 Main 侧执行，当前窗口可收起，完成后会更新扫描摘要。'
+              : '确认仓库后会进入 Main 侧拉取缓存与代码扫描。'}
+          </p>
+        ) : null}
+        {dialog.status === 'success' && repositoryPreparationResult ? (
+          <p className="ppt-progress-hint">代码仓库已准备完成；下一阶段将继续做论文段落与代码文件的对应分析并生成 Markdown 笔记。</p>
+        ) : null}
+        <div className="confirm-modal-actions">
+          <button
+            className="note-toolbar-button code-analysis-confirm-button"
+            type="button"
+            onClick={onRepositoryConfirm}
+            disabled={!canConfirmSelectedCandidate}
+          >
+            <span className="codicon codicon-check" aria-hidden="true" />
+            {dialog.isPreparingRepository
+              ? '准备中'
+              : dialog.status === 'error'
+                ? '重试准备'
+                : dialog.confirmedRepositoryUrl && !canConfirmSelectedCandidate
+                  ? '已确认仓库'
+                  : '确认并准备仓库'}
+          </button>
+          <button className="note-toolbar-button" type="button" onClick={onClose}>
+            {closeLabel}
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+function getMindmapGenerationStatusLabel(status: MindmapGenerationDialogState['status']): string {
+  if (status === 'success') {
+    return '已完成'
+  }
+
+  if (status === 'error') {
+    return '失败'
+  }
+
+  return '进行中'
+}
+
+function getMindmapGenerationStatusIcon(status: MindmapGenerationDialogState['status']): string {
+  if (status === 'success') {
+    return 'codicon-check'
+  }
+
+  if (status === 'error') {
+    return 'codicon-error'
+  }
+
+  return 'codicon-loading'
+}
+
+function getCodeAnalysisStatusLabel(status: CodeAnalysisDialogState['status']): string {
+  if (status === 'success') {
+    return '已完成'
+  }
+
+  if (status === 'error') {
+    return '失败'
+  }
+
+  return '进行中'
+}
+
+function getCodeAnalysisStatusIcon(status: CodeAnalysisDialogState['status']): string {
+  if (status === 'success') {
+    return 'codicon-check'
+  }
+
+  if (status === 'error') {
+    return 'codicon-error'
+  }
+
+  return 'codicon-loading'
+}
+
+function getRepositoryCandidateConfidenceLabel(confidence: RepositoryCandidate['confidence']): string {
+  if (confidence === 'high') {
+    return '高置信'
+  }
+
+  if (confidence === 'medium') {
+    return '中置信'
+  }
+
+  return '低置信'
+}
+
+function getRepositoryCandidateSourceLabel(source: RepositoryCandidate['source']): string {
+  if (source === 'manual') {
+    return '手动输入'
+  }
+
+  if (source === 'mineru-block') {
+    return 'MinerU block'
+  }
+
+  return 'MinerU markdown'
+}
+
+function getCodeRepositoryImportantFileKindLabel(kind: CodeRepositoryPreparationResult['importantFiles'][number]['kind']): string {
+  if (kind === 'readme') {
+    return 'README'
+  }
+
+  if (kind === 'config') {
+    return '配置'
+  }
+
+  if (kind === 'entry') {
+    return '入口'
+  }
+
+  if (kind === 'notebook') {
+    return 'Notebook'
+  }
+
+  if (kind === 'script') {
+    return '脚本'
+  }
+
+  if (kind === 'source') {
+    return '源码'
+  }
+
+  return '其他'
+}
+
 const reasoningOptions: Array<{
   value: ReasoningEffort
   label: string
@@ -3169,6 +6497,13 @@ const reasoningOptions: Array<{
 ]
 
 const aiQuickActions: AiQuickAction[] = [
+  {
+    id: 'code-analysis',
+    label: '代码解析',
+    icon: 'codicon-code',
+    prompt: '执行当前论文的代码解析流程',
+    command: codeAnalysisAnalyzeCurrentPaperCommand
+  },
   {
     id: 'paper-summary',
     label: '文章总结',
@@ -3360,6 +6695,7 @@ function WorkbenchPanelLayout({
   layout,
   activeView,
   activeEditor,
+  noteEditorEngine,
   isPrimarySidebarCollapsed,
   hiddenDockPanels,
   libraryPdfPaths,
@@ -3371,6 +6707,7 @@ function WorkbenchPanelLayout({
   pdfViewStates,
   notesByPaperPath,
   savedNotesByPaperPath,
+  translationCompareNoteIdsByPaperPath,
   focusedPdfSourceRegion,
   focusedPdfSourceRegionNonce,
   selectedNoteIdsByPaperPath,
@@ -3380,8 +6717,18 @@ function WorkbenchPanelLayout({
   aiConversationsByPaperPath,
   activeAiConversationIdsByPaperPath,
   focusedAiMessageId,
+  mindmapsByPaperPath,
+  isMindmapGenerating,
   favoriteItemsByKey,
   aiSettings,
+  pptSettings,
+  pptModelOptions,
+  pptReasoningOptions,
+  pdfEditorSettings,
+  isPptGenerating,
+  onPptSettingsChange,
+  onGeneratePptFromPaper,
+  pendingAiDraftRequest,
   mineruSettings,
   mineruParseResultByPdfPath,
   mineruCacheExistsByPdfPath,
@@ -3398,7 +6745,12 @@ function WorkbenchPanelLayout({
   onAiConversationBranch,
   onAiConversationRename,
   onAiConversationDelete,
+  onPendingAiDraftRequestConsumed,
   onAiGraphNodeSelect,
+  onGraphEditorOpen,
+  onMindmapEditorOpen,
+  onMindmapGenerate,
+  onMindmapNodeJump,
   onFavoriteToggle,
   onDockPanelClose,
   onLibrarySortModeChange,
@@ -3408,10 +6760,12 @@ function WorkbenchPanelLayout({
   onCreatePdfNote,
   onParseWithMineru,
   onGenerateMineruNote,
+  onOpenFullTranslation,
   onHideMineruLinkedRegions,
   onShowMineruLinkedRegions,
   onMineruClearCurrentCache,
   onMineruClearAllCaches,
+  onQuickCommand,
   hiddenMineruOverlayByPdfPath,
   linkedNoteRegions,
   onLinkedNoteRegionSelect,
@@ -3430,6 +6784,7 @@ function WorkbenchPanelLayout({
   onToggleAiHistory,
   onAiPopoversDismiss,
   onAskSelection,
+  onExplainSelection,
   onMineruBlockDropToAi,
   onNoteCreateStart,
   onNoteSelect,
@@ -3449,6 +6804,9 @@ function WorkbenchPanelLayout({
   onNoteSourceJump,
   onNoteMarkdownCopy,
   onNoteExport,
+  onNoteMilkdownSave,
+  onNoteMilkdownExport,
+  onNoteEditorEngineChange,
   onNoteImagePaste,
   onNoteRestore,
   onMineruBlockDropToNote,
@@ -3461,6 +6819,7 @@ function WorkbenchPanelLayout({
   layout: DockLayoutNode
   activeView: PrimaryView
   activeEditor: EditorTab
+  noteEditorEngine: PersistedNoteEditorEngine
   isPrimarySidebarCollapsed: boolean
   hiddenDockPanels: ClosableDockPanelId[]
   libraryPdfPaths: string[]
@@ -3472,6 +6831,7 @@ function WorkbenchPanelLayout({
   pdfViewStates: PdfViewStates
   notesByPaperPath: NotesByPaperPath
   savedNotesByPaperPath: NotesByPaperPath
+  translationCompareNoteIdsByPaperPath: Record<string, string>
   focusedPdfSourceRegion: PdfLinkedNoteRegion | null
   focusedPdfSourceRegionNonce: number
   selectedNoteIdsByPaperPath: SelectedNoteIdsByPaperPath
@@ -3481,8 +6841,18 @@ function WorkbenchPanelLayout({
   aiConversationsByPaperPath: AiConversationsByPaperPath
   activeAiConversationIdsByPaperPath: ActiveAiConversationIdsByPaperPath
   focusedAiMessageId: string
+  mindmapsByPaperPath: MindmapsByPaperPath
+  isMindmapGenerating: boolean
   favoriteItemsByKey: FavoriteItemsByKey
   aiSettings: PersistedAiSettingsState
+  pptSettings: PdfPptToolbarSettings
+  pptModelOptions: string[]
+  pptReasoningOptions: typeof reasoningOptions
+  pdfEditorSettings: PersistedPdfEditorSettingsState
+  isPptGenerating: boolean
+  onPptSettingsChange: (patch: Partial<PdfPptToolbarSettings>) => void
+  onGeneratePptFromPaper: (filePath: string) => void
+  pendingAiDraftRequest: PendingAiDraftRequest | null
   mineruSettings: PersistedMineruSettingsState
   mineruParseResultByPdfPath: Record<string, MineruParseResult>
   mineruCacheExistsByPdfPath: Record<string, boolean>
@@ -3499,6 +6869,7 @@ function WorkbenchPanelLayout({
       title?: string
       parentAnswerId?: string
       messages?: ChatMessage[]
+      contextSelections?: AiContextSelection[]
     }
   ) => string
   onAiConversationSelect: (paperPath: string, conversationId: string) => void
@@ -3506,7 +6877,12 @@ function WorkbenchPanelLayout({
   onAiConversationBranch: (conversationId: string, answerId: string) => void
   onAiConversationRename: (conversationId: string) => void
   onAiConversationDelete: (conversationId: string) => void
+  onPendingAiDraftRequestConsumed: (requestId: string) => void
   onAiGraphNodeSelect: (target: AiGraphSelectTarget) => void
+  onGraphEditorOpen: () => void
+  onMindmapEditorOpen: (filePath?: string) => void
+  onMindmapGenerate: () => void
+  onMindmapNodeJump: (target: MindmapNodeJumpTarget) => void
   onFavoriteToggle: (target: FavoriteTarget, label: string) => void
   onDockPanelClose: (panelId: ClosableDockPanelId) => void
   onLibrarySortModeChange: (sortMode: LibrarySortMode) => void
@@ -3516,10 +6892,12 @@ function WorkbenchPanelLayout({
   onCreatePdfNote: (filePath: string) => void
   onParseWithMineru: (filePath: string) => void
   onGenerateMineruNote: (filePath: string) => void
+  onOpenFullTranslation: (filePath: string) => void
   onHideMineruLinkedRegions: (filePath: string) => void
   onShowMineruLinkedRegions: (filePath: string) => void
   onMineruClearCurrentCache: (filePath: string) => void
   onMineruClearAllCaches: () => void
+  onQuickCommand: (command: string, paperPath: string) => void
   hiddenMineruOverlayByPdfPath: Record<string, boolean>
   linkedNoteRegions: PdfLinkedNoteRegion[]
   onLinkedNoteRegionSelect: (region: PdfLinkedNoteRegion) => void
@@ -3537,7 +6915,8 @@ function WorkbenchPanelLayout({
   onToggleAiConfig: () => void
   onToggleAiHistory: () => void
   onAiPopoversDismiss: () => void
-  onAskSelection: () => void
+  onAskSelection: (filePath: string, selection: PdfSelectionSnapshot) => void
+  onExplainSelection: (filePath: string, selection: PdfSelectionSnapshot) => Promise<SelectionExplainResult>
   onMineruBlockDropToAi: (payload: MineruBlockDragPayload) => {
     text?: string
     imageAttachment?: ImageAttachmentItem
@@ -3561,9 +6940,12 @@ function WorkbenchPanelLayout({
   onNoteSourceJump: (filePath: string, noteId: string, blockId: string) => void
   onNoteMarkdownCopy: (filePath: string, noteId: string) => void
   onNoteExport: (filePath: string, noteId: string, format: NoteExportFormat) => void
+  onNoteMilkdownSave: (filePath: string, noteId: string, markdown: string) => void
+  onNoteMilkdownExport: (filePath: string, noteId: string, format: NoteExportFormat, markdown: string) => void
+  onNoteEditorEngineChange: (engine: PersistedNoteEditorEngine) => void
   onNoteImagePaste: (filePath: string, noteId: string, images: ClipboardImagePayload[], insertAfterBlockId?: string | null) => void
   onNoteRestore: (filePath: string, noteId: string, noteSnapshot: NoteDocument) => void
-  onMineruBlockDropToNote: (payload: MineruBlockDragPayload, insertAfterBlockId?: string | null) => void
+  onMineruBlockDropToNote: (payload: MineruBlockDragPayload, insertAfterBlockId?: string | null) => string | undefined
   focusedNoteBlockRequest?: {
     filePath: string
     noteId: string
@@ -3591,6 +6973,9 @@ function WorkbenchPanelLayout({
     currentAiPaperPath && currentAiConversations.some((conversation) => conversation.id === activeAiConversationIdsByPaperPath[currentAiPaperPath])
       ? activeAiConversationIdsByPaperPath[currentAiPaperPath]
       : currentAiConversations[0]?.id ?? ''
+  const currentMindmap = currentAiPaperPath ? mindmapsByPaperPath[currentAiPaperPath] : undefined
+  const currentMindmapPaperTitle = currentAiPaperPath ? getPdfDisplayName(currentAiPaperPath, pdfDisplayNamesByPath) : '论文脑图'
+  const currentMindmapWarnings = currentMindmap?.warnings ?? []
 
   const updateDropPreview = (nextPreview: DockDropPreview): void => {
     setDropPreview((current) =>
@@ -3620,6 +7005,7 @@ function WorkbenchPanelLayout({
             view={activeView}
             openPdfPaths={libraryPdfPaths}
             selectedPdfPath={selectedPdfPath}
+            activeEditor={activeEditor}
             libraryStructure={libraryStructure}
             pdfFileInfoByPath={pdfFileInfoByPath}
             pdfDisplayNamesByPath={pdfDisplayNamesByPath}
@@ -3630,6 +7016,7 @@ function WorkbenchPanelLayout({
             aiConversationsByPaperPath={aiConversationsByPaperPath}
             activeAiConversationIdsByPaperPath={activeAiConversationIdsByPaperPath}
             focusedAiMessageId={focusedAiMessageId}
+            mindmapsByPaperPath={mindmapsByPaperPath}
             mineruParseResultByPdfPath={mineruParseResultByPdfPath}
             mineruCacheExistsByPdfPath={mineruCacheExistsByPdfPath}
             librarySortMode={librarySortMode}
@@ -3644,6 +7031,7 @@ function WorkbenchPanelLayout({
             onLibraryPdfMoveToFolder={onLibraryPdfMoveToFolder}
             onLibraryPdfMoveToRoot={onLibraryPdfMoveToRoot}
             onAiGraphNodeSelect={onAiGraphNodeSelect}
+            onMindmapEditorOpen={onMindmapEditorOpen}
             onFavoriteToggle={onFavoriteToggle}
             onNoteEntryRename={onNoteEntryRename}
             onNoteEntryDelete={onNoteEntryDelete}
@@ -3660,21 +7048,42 @@ function WorkbenchPanelLayout({
             activeEditor={activeEditor}
             openPdfPaths={openPdfPaths}
             selectedPdfPath={selectedPdfPath}
+            currentGraphPaperPath={currentAiPaperPath}
+            currentGraphPaperTitle={currentAiPaperPath ? getPdfDisplayName(currentAiPaperPath, pdfDisplayNamesByPath) : 'AI 问答图'}
+            currentMindmap={currentMindmap}
+            currentMindmapPaperTitle={currentMindmapPaperTitle}
+            isMindmapGenerating={isMindmapGenerating}
+            mindmapWarnings={currentMindmapWarnings}
+            graphConversations={currentAiConversations}
+            activeGraphConversationId={activeAiConversationId}
+            focusedAiMessageId={focusedAiMessageId}
             pdfViewStates={pdfViewStates}
             focusedPdfSourceRegion={focusedPdfSourceRegion}
             focusedPdfSourceRegionNonce={focusedPdfSourceRegionNonce}
             onOpenPdf={onOpenPdf}
             onStatus={onStatus}
+            onAiGraphNodeSelect={onAiGraphNodeSelect}
+            onMindmapGenerate={onMindmapGenerate}
+            onMindmapNodeJump={onMindmapNodeJump}
             onAskSelection={onAskSelection}
-            onCreatePdfNote={onCreatePdfNote}
-            onParseWithMineru={onParseWithMineru}
-            onGenerateMineruNote={onGenerateMineruNote}
-            onHideMineruLinkedRegions={onHideMineruLinkedRegions}
+            onExplainSelection={onExplainSelection}
+          onCreatePdfNote={onCreatePdfNote}
+          onParseWithMineru={onParseWithMineru}
+          onGenerateMineruNote={onGenerateMineruNote}
+          onOpenFullTranslation={onOpenFullTranslation}
+          onHideMineruLinkedRegions={onHideMineruLinkedRegions}
             onShowMineruLinkedRegions={onShowMineruLinkedRegions}
             onMineruClearCurrentCache={onMineruClearCurrentCache}
             onMineruClearAllCaches={onMineruClearAllCaches}
             onPdfViewStateChange={onPdfViewStateChange}
             onPdfToolbarChange={onPdfToolbarChange}
+            pptSettings={pptSettings}
+            pptModelOptions={pptModelOptions}
+            pptReasoningOptions={pptReasoningOptions}
+            pdfEditorSettings={pdfEditorSettings}
+            isPptGenerating={isPptGenerating}
+            onPptSettingsChange={onPptSettingsChange}
+            onGeneratePpt={(filePath) => onGeneratePptFromPaper(filePath)}
             mineruSettings={mineruSettings}
             onMineruSettingsChange={onMineruSettingsChange}
             mineruParseResultByPdfPath={mineruParseResultByPdfPath}
@@ -3695,41 +7104,89 @@ function WorkbenchPanelLayout({
         : ''
       const note = selectedNoteId ? notes.find((currentNote) => currentNote.id === selectedNoteId) : undefined
       const isDirty = note ? isNoteDirty(savedNotesByPaperPath, notesByPaperPath, visiblePdfPath, note.id) : false
+      const isTranslationCompareMode =
+        Boolean(visiblePdfPath && note && translationCompareNoteIdsByPaperPath[visiblePdfPath] === note.id)
 
       return (
         <section className="editor-area note-panel-area">
-          <NotePanelContent
-            visiblePdfPath={visiblePdfPath}
-            notes={notes}
-            note={note}
-            isTemplatePending={isTemplatePending}
-            isDirty={isDirty}
-            favoriteItemsByKey={favoriteItemsByKey}
-            isCreatingScreenshotNote={creatingScreenshotNotePath === visiblePdfPath}
-            onOpenPdf={onOpenPdf}
-            onFavoriteToggle={onFavoriteToggle}
-            onSave={onNoteSave}
-            onTitleChange={onNoteTitleChange}
-            onBlockAdd={onNoteBlockAdd}
-            onBlockTypeChange={onNoteBlockTypeChange}
-            onBlockTextChange={onNoteBlockTextChange}
-            onBlockStyleChange={onNoteBlockStyleChange}
-            onBlockMediaChange={onNoteBlockMediaChange}
-            onBlockDelete={onNoteBlockDelete}
-            onBlockMove={onNoteBlockMove}
-            onTodoChange={onNoteTodoChange}
-            onSourceJump={onNoteSourceJump}
-            onMarkdownCopy={onNoteMarkdownCopy}
-            onExportNote={onNoteExport}
-            onImagePaste={onNoteImagePaste}
-            onNoteRestore={onNoteRestore}
-            onMineruBlockDrop={onMineruBlockDropToNote}
-            onReadPastedImages={readPastedClipboardImages}
-            focusedNoteBlockRequest={focusedNoteBlockRequest}
-            onTextTemplateCreate={onTextTemplateCreate}
-            onFreeformTemplateCreate={onFreeformTemplateCreate}
-            onScreenshotTemplateCreate={onScreenshotTemplateCreate}
-          />
+          {noteEditorEngine === 'milkdown' ? (
+            note ? (
+              <MilkdownNoteEditor
+                note={note}
+                isDirty={isDirty}
+                isTranslationCompareMode={isTranslationCompareMode}
+                onSave={visiblePdfPath ? (markdown) => onNoteMilkdownSave(visiblePdfPath, note.id, markdown) : undefined}
+                onExport={visiblePdfPath ? (format, markdown) => onNoteMilkdownExport(visiblePdfPath, note.id, format, markdown) : undefined}
+                onSourceJump={visiblePdfPath ? (blockId) => onNoteSourceJump(visiblePdfPath, note.id, blockId) : undefined}
+                onMineruBlockDrop={onMineruBlockDropToNote}
+              />
+            ) : (
+              <div className="note-surface milkdown-note-surface">
+                <div className="note-panel-toolbar milkdown-note-toolbar">
+                  <div className="note-panel-toolbar-group">
+                    <span className="codicon codicon-markdown" aria-hidden="true" />
+                    <span>Markdown 笔记编辑器</span>
+                  </div>
+                </div>
+                {visiblePdfPath ? (
+                  <div className="note-page-scroll">
+                    <NoteTemplateChooser
+                      filePath={visiblePdfPath}
+                      isCreatingScreenshotNote={creatingScreenshotNotePath === visiblePdfPath}
+                      onTextTemplateCreate={onTextTemplateCreate}
+                      onFreeformTemplateCreate={onFreeformTemplateCreate}
+                      onScreenshotTemplateCreate={onScreenshotTemplateCreate}
+                    />
+                  </div>
+                ) : (
+                  <div className="note-page-scroll">
+                    <div className="pdf-placeholder">
+                      <span className="codicon codicon-notebook" aria-hidden="true" />
+                      <h1>未选择笔记</h1>
+                      <p>先导入或打开一篇 PDF，再从侧边栏或 View 菜单打开对应笔记。</p>
+                      <button className="primary-button compact" type="button" onClick={onOpenPdf}>
+                        导入 PDF
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )
+          ) : (
+            <NotePanelContent
+              visiblePdfPath={visiblePdfPath}
+              notes={notes}
+              note={note}
+              isTemplatePending={isTemplatePending}
+              isDirty={isDirty}
+              favoriteItemsByKey={favoriteItemsByKey}
+              isCreatingScreenshotNote={creatingScreenshotNotePath === visiblePdfPath}
+              onOpenPdf={onOpenPdf}
+              onFavoriteToggle={onFavoriteToggle}
+              onSave={onNoteSave}
+              onTitleChange={onNoteTitleChange}
+              onBlockAdd={onNoteBlockAdd}
+              onBlockTypeChange={onNoteBlockTypeChange}
+              onBlockTextChange={onNoteBlockTextChange}
+              onBlockStyleChange={onNoteBlockStyleChange}
+              onBlockMediaChange={onNoteBlockMediaChange}
+              onBlockDelete={onNoteBlockDelete}
+              onBlockMove={onNoteBlockMove}
+              onTodoChange={onNoteTodoChange}
+              onSourceJump={onNoteSourceJump}
+              onMarkdownCopy={onNoteMarkdownCopy}
+              onExportNote={onNoteExport}
+              onSwitchToMilkdown={() => onNoteEditorEngineChange('milkdown')}
+              onImagePaste={onNoteImagePaste}
+              onNoteRestore={onNoteRestore}
+              onMineruBlockDrop={onMineruBlockDropToNote}
+              onReadPastedImages={readPastedClipboardImages}
+              focusedNoteBlockRequest={focusedNoteBlockRequest}
+              onTextTemplateCreate={onTextTemplateCreate}
+              onFreeformTemplateCreate={onFreeformTemplateCreate}
+              onScreenshotTemplateCreate={onScreenshotTemplateCreate}
+            />
+          )}
         </section>
       )
     }
@@ -3747,6 +7204,7 @@ function WorkbenchPanelLayout({
           focusedMessageId={focusedAiMessageId}
           favoriteItemsByKey={favoriteItemsByKey}
           settings={aiSettings}
+          pendingDraftRequest={pendingAiDraftRequest}
           onSettingsChange={onAiSettingsChange}
           onConversationCreate={onAiConversationCreateForPaper}
           onConversationSelect={onAiConversationSelect}
@@ -3754,7 +7212,9 @@ function WorkbenchPanelLayout({
           onConversationBranch={onAiConversationBranch}
           onConversationRename={onAiConversationRename}
           onConversationDelete={onAiConversationDelete}
+          onPendingDraftRequestConsumed={onPendingAiDraftRequestConsumed}
           onFavoriteToggle={onFavoriteToggle}
+          onQuickCommand={onQuickCommand}
           onPopoversDismiss={onAiPopoversDismiss}
           onMineruBlockDropToAi={onMineruBlockDropToAi}
           onStatus={onStatus}
@@ -3783,9 +7243,15 @@ function WorkbenchPanelLayout({
               openPdfPaths={openPdfPaths}
               selectedPdfPath={selectedPdfPath}
               pdfDisplayNamesByPath={pdfDisplayNamesByPath}
+              currentGraphPaperPath={currentAiPaperPath}
+              currentGraphPaperTitle={currentAiPaperPath ? getPdfDisplayName(currentAiPaperPath, pdfDisplayNamesByPath) : 'AI 问答图'}
+              currentMindmapPaperPath={currentAiPaperPath}
+              currentMindmapPaperTitle={currentMindmapPaperTitle}
               onOpenPdf={onOpenPdf}
               onPdfTabClose={onPdfTabClose}
               onPdfTabSelect={onPdfTabSelect}
+              onGraphOpen={onGraphEditorOpen}
+              onMindmapOpen={() => onMindmapEditorOpen(currentAiPaperPath)}
               onProfileOpen={onProfileOpen}
             />
           ) : panelId === 'note' ? (
@@ -4070,18 +7536,30 @@ function EditorTitlebarTabs({
   openPdfPaths,
   selectedPdfPath,
   pdfDisplayNamesByPath,
+  currentGraphPaperPath,
+  currentGraphPaperTitle,
+  currentMindmapPaperPath,
+  currentMindmapPaperTitle,
   onOpenPdf,
   onPdfTabClose,
   onPdfTabSelect,
+  onGraphOpen,
+  onMindmapOpen,
   onProfileOpen
 }: {
   activeEditor: EditorTab
   openPdfPaths: string[]
   selectedPdfPath: string
   pdfDisplayNamesByPath: PdfDisplayNamesByPath
+  currentGraphPaperPath: string
+  currentGraphPaperTitle: string
+  currentMindmapPaperPath: string
+  currentMindmapPaperTitle: string
   onOpenPdf: () => void
   onPdfTabClose: (filePath: string) => void
   onPdfTabSelect: (filePath: string) => void
+  onGraphOpen: () => void
+  onMindmapOpen: () => void
   onProfileOpen: () => void
 }): ReactElement {
   return (
@@ -4107,6 +7585,32 @@ function EditorTitlebarTabs({
               <span />
             </span>
             <span>个人主页</span>
+          </button>
+        ) : null}
+        {activeEditor === 'graph' ? (
+          <button
+            className="browser-graph-tab active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            title={currentGraphPaperPath || 'AI 问答图'}
+            onClick={onGraphOpen}
+          >
+            <span className="codicon codicon-type-hierarchy-sub" aria-hidden="true" />
+            <span>{currentGraphPaperTitle || 'AI 问答图'}</span>
+          </button>
+        ) : null}
+        {activeEditor === 'mindmap' ? (
+          <button
+            className="browser-graph-tab active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            title={currentMindmapPaperPath || '论文脑图'}
+            onClick={onMindmapOpen}
+          >
+            <span className="codicon codicon-type-hierarchy-sub" aria-hidden="true" />
+            <span>{currentMindmapPaperTitle || '论文脑图'}</span>
           </button>
         ) : null}
         {openPdfPaths.length > 0 ? (
@@ -4327,6 +7831,7 @@ function AiChatPanel({
   focusedMessageId,
   favoriteItemsByKey,
   settings,
+  pendingDraftRequest,
   onSettingsChange,
   onConversationCreate,
   onConversationSelect,
@@ -4334,7 +7839,9 @@ function AiChatPanel({
   onConversationBranch,
   onConversationRename,
   onConversationDelete,
+  onPendingDraftRequestConsumed,
   onFavoriteToggle,
+  onQuickCommand,
   onPopoversDismiss,
   onMineruBlockDropToAi,
   onStatus
@@ -4349,6 +7856,7 @@ function AiChatPanel({
   focusedMessageId: string
   favoriteItemsByKey: FavoriteItemsByKey
   settings: PersistedAiSettingsState
+  pendingDraftRequest: PendingAiDraftRequest | null
   onSettingsChange: (patch: Partial<PersistedAiSettingsState>) => void
   onConversationCreate: (
     paperPath: string,
@@ -4364,7 +7872,9 @@ function AiChatPanel({
   onConversationBranch: (conversationId: string, answerId: string) => void
   onConversationRename: (conversationId: string) => void
   onConversationDelete: (conversationId: string) => void
+  onPendingDraftRequestConsumed: (requestId: string) => void
   onFavoriteToggle: (target: FavoriteTarget, label: string) => void
+  onQuickCommand: (command: string, paperPath: string) => void
   onPopoversDismiss: () => void
   onMineruBlockDropToAi: (payload: MineruBlockDragPayload) => {
     text?: string
@@ -4374,6 +7884,7 @@ function AiChatPanel({
   onStatus: (status: string) => void
 }): ReactElement {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const draftInputRef = useRef<HTMLTextAreaElement | null>(null)
   const composerRef = useRef<HTMLDivElement | null>(null)
   const turnListRef = useRef<HTMLDivElement | null>(null)
   const turnRefs = useRef<Record<string, HTMLElement | null>>({})
@@ -4454,6 +7965,20 @@ function AiChatPanel({
   useEffect(() => {
     setContextNotice('')
   }, [paperPath])
+
+  useEffect(() => {
+    if (!pendingDraftRequest || pendingDraftRequest.paperPath !== paperPath) {
+      return
+    }
+
+    setDraft(pendingDraftRequest.prompt)
+    setContextNotice('已载入 PDF 选区，可直接发送或继续补充问题')
+    onPendingDraftRequestConsumed(pendingDraftRequest.id)
+    window.setTimeout(() => {
+      draftInputRef.current?.focus()
+      draftInputRef.current?.setSelectionRange(pendingDraftRequest.prompt.length, pendingDraftRequest.prompt.length)
+    }, 0)
+  }, [onPendingDraftRequestConsumed, paperPath, pendingDraftRequest])
 
   useEffect(() => {
     setIsContextExpanded(false)
@@ -4834,6 +8359,12 @@ function AiChatPanel({
       return
     }
 
+    if (action.command) {
+      onStatus(`正在执行：${action.label}`)
+      onQuickCommand(action.command, paperPath)
+      return
+    }
+
     setDraft(action.prompt)
     void sendMessage(action.prompt)
   }
@@ -5048,11 +8579,11 @@ function AiChatPanel({
               <input value={model} spellCheck={false} onChange={(event) => onSettingsChange({ model: event.target.value })} />
             </label>
             <label>
-              <span>API Key</span>
+              <span>默认共享 API Key</span>
               <input
                 type="password"
                 value={settings.apiKey}
-                placeholder="保存在本地 userData"
+                placeholder="翻译/PPT 未单独填 Key 时会使用这里"
                 spellCheck={false}
                 onChange={(event) => onSettingsChange({ apiKey: event.target.value })}
               />
@@ -5518,6 +9049,7 @@ function AiChatPanel({
           </div>
         )}
         <textarea
+          ref={draftInputRef}
           value={draft}
           rows={5}
           placeholder="问论文、方法、公式、实验或笔记..."
@@ -6460,6 +9992,169 @@ function getMineruNoteBlockId(noteId: string, mineruBlockId: string): string {
   return `note_block_mineru_${hashString(`${noteId}:${mineruBlockId}`)}`
 }
 
+function isMineruTranslationBlock(block: MineruParseBlock): boolean {
+  return block.type === 'heading' || block.type === 'paragraph' || block.type === 'list'
+}
+
+function describeMineruTranslationBlock(block: MineruParseBlock, index: number): string {
+  const typeLabel = block.type === 'heading' ? '标题' : block.type === 'list' ? '列表' : '段落'
+  return `#${index} · p.${block.pageNo} · ${typeLabel}`
+}
+
+function createTranslationCompareNote(input: {
+  noteId: string
+  title: string
+  paperId: string
+  rows: string[][]
+  now: string
+  existingNote?: NoteDocument
+}): NoteDocument {
+  const noteId = input.noteId
+  const blocks = [
+    createNoteBlock({
+      noteId,
+      type: 'heading',
+      orderIndex: 0,
+      content: {
+        text: input.title,
+        level: 1
+      },
+      now: input.now
+    }),
+    createNoteBlock({
+      noteId,
+      type: 'table',
+      orderIndex: 1,
+      content: {
+        rows: [
+          ['段落', '原文', '译文'],
+          ...input.rows.map((row) => row.map((cell) => cell))
+        ]
+      },
+      now: input.now
+    })
+  ].map((block, index) => ({
+    ...block,
+    id: `${noteId}_${index === 0 ? 'heading' : 'table'}`,
+    noteId,
+    orderIndex: index
+  }))
+
+  if (input.existingNote) {
+    return {
+      ...input.existingNote,
+      title: input.title,
+      template: 'freeform',
+      paperId: input.paperId,
+      blocks,
+      updatedAt: input.now
+    }
+  }
+
+  return {
+    id: noteId,
+    title: input.title,
+    template: 'freeform',
+    paperId: input.paperId,
+    blocks,
+    createdAt: input.now,
+    updatedAt: input.now
+  }
+}
+
+type MineruTranslationBatchItem = BatchTranslationItem & {
+  rowIndex: number
+}
+
+function getMineruTranslationBatchSize(input: unknown): number {
+  return typeof input === 'number' && Number.isFinite(input) ? Math.min(10, Math.max(1, Math.round(input))) : 5
+}
+
+function getMineruTranslationBatchItemId(block: MineruParseBlock, index: number): string {
+  return `block-${index + 1}-${hashString(block.id || `${block.pageNo}:${index}`)}`
+}
+
+function chunkMineruTranslationItems(items: MineruTranslationBatchItem[], batchSize: number): MineruTranslationBatchItem[][] {
+  const chunks: MineruTranslationBatchItem[][] = []
+  for (let index = 0; index < items.length; index += batchSize) {
+    chunks.push(items.slice(index, index + batchSize))
+  }
+
+  return chunks
+}
+
+async function translateMineruBlockBatch(input: {
+  items: MineruTranslationBatchItem[]
+  targetLanguage: string
+  settings: PersistedAiSettingsState
+}) {
+  return window.thesisAgent.translateBatch({
+    items: input.items.map((item) => ({
+      id: item.id,
+      label: item.label,
+      text: item.text
+    })),
+    targetLanguage: input.targetLanguage,
+    ai: {
+      providerId: input.settings.providerId,
+      baseUrl: input.settings.baseUrl,
+      model: input.settings.model,
+      reasoningEffort: input.settings.reasoningEffort,
+      disableResponseStorage: input.settings.disableResponseStorage,
+      requiresOpenAiAuth: input.settings.requiresOpenAiAuth,
+      apiKey: input.settings.apiKey
+    }
+  })
+}
+
+function splitMineruTranslationChunks(text: string, maxLength: number): string[] {
+  const normalized = text.replace(/\r\n/g, '\n').trim()
+  if (normalized.length <= maxLength) {
+    return [normalized]
+  }
+
+  const chunks: string[] = []
+  let remaining = normalized
+
+  while (remaining.length > maxLength) {
+    const splitIndex = findMineruTranslationChunkSplitIndex(remaining, maxLength)
+    const nextChunk = remaining.slice(0, splitIndex).trim()
+    if (nextChunk) {
+      chunks.push(nextChunk)
+    }
+
+    remaining = remaining.slice(splitIndex).trimStart()
+  }
+
+  if (remaining) {
+    chunks.push(remaining)
+  }
+
+  return chunks
+}
+
+function findMineruTranslationChunkSplitIndex(text: string, maxLength: number): number {
+  const preferredBoundaryChars = new Set(['\n', '。', '！', '？', '；', '：', '!', '?', ';', ':'])
+  const fallbackBoundaryChars = new Set(['，', ',', '、', ' '])
+  const minLength = Math.max(800, Math.floor(maxLength * 0.6))
+
+  for (let index = maxLength; index >= minLength; index -= 1) {
+    const currentChar = text[index - 1]
+    if (preferredBoundaryChars.has(currentChar)) {
+      return index
+    }
+  }
+
+  for (let index = maxLength; index >= minLength; index -= 1) {
+    const currentChar = text[index - 1]
+    if (fallbackBoundaryChars.has(currentChar)) {
+      return index
+    }
+  }
+
+  return maxLength
+}
+
 function buildMineruNoteBlockStyle(
   template: PersistedMineruSettingsState['noteStyle'],
   input: { useBulletList?: boolean } = {}
@@ -6530,7 +10225,7 @@ function createMineruDroppedNoteBlock(
           }
         : block.type === 'equation'
           ? {
-              latex: block.text?.trim() ?? text
+              latex: block.text?.trim() || ''
             }
           : block.type === 'table'
             ? {
@@ -6549,7 +10244,11 @@ function createMineruDroppedNoteBlock(
     }),
     sourceRefs: []
   })
-  const sourceQuote = usesVisualScreenshot ? block.caption?.trim() || undefined : text || block.caption?.trim() || undefined
+  const sourceQuote = usesVisualScreenshot
+    ? block.caption?.trim() || undefined
+    : block.type === 'equation'
+      ? block.text?.trim() || undefined
+      : text || block.caption?.trim() || undefined
   return {
     ...createdBlock,
     sourceRefs: createMineruBlockSourceRefs(createdBlock.id, block, filePath, sourceQuote)
@@ -6971,6 +10670,20 @@ function buildPromptWithPaperContext(userPrompt: string, context: AiPaperContext
   ].filter((section) => section.length > 0)
 
   return sections.join('\n\n')
+}
+
+function buildAskSelectionPrompt(text: string, pageNo?: number): string {
+  const normalizedText = text.replace(/\s+/g, ' ').trim()
+  const clippedText =
+    normalizedText.length > 6000 ? `${normalizedText.slice(0, 6000)}\n\n[选区较长，已截断到前 6000 个字符]` : normalizedText
+  const pageLine = typeof pageNo === 'number' && Number.isFinite(pageNo) ? `页码：p.${pageNo}\n` : ''
+
+  return [
+    '请解释下面这段论文选区，说明它在论文语境中的含义、关键术语和可能的前后逻辑。回答要简洁，保留关键术语英文原文。',
+    '',
+    `${pageLine}原文：`,
+    clippedText
+  ].join('\n')
 }
 
 async function extractPdfTextForAiContext(
@@ -7876,6 +11589,70 @@ function getSelectedOpenNoteIdForPaper(
   return openNoteIds[0] ?? ''
 }
 
+function findMindmapNodeMineruBlock(
+  result: MineruParseResult,
+  label: string,
+  pageNo: number
+): MineruParseBlock | undefined {
+  const normalizedLabel = normalizeMindmapNodeLabel(label)
+  const blocksOnPage = result.blocks.filter((block) => block.pageNo === pageNo)
+
+  if (normalizedLabel) {
+    const exactMatch = blocksOnPage.find((block) => normalizeMindmapNodeLabel(getMineruBlockMindmapLabel(block)) === normalizedLabel)
+    if (exactMatch) {
+      return exactMatch
+    }
+
+    const textMatch = blocksOnPage.find((block) => normalizeMindmapNodeLabel(getMineruBlockPlainText(block)) === normalizedLabel)
+    if (textMatch) {
+      return textMatch
+    }
+  }
+
+  return blocksOnPage.find((block) => block.type === 'heading')
+    ?? blocksOnPage.find((block) => block.type === 'paragraph')
+    ?? blocksOnPage[0]
+}
+
+function createMindmapSourceRegion(
+  filePath: string,
+  block: MineruParseBlock,
+  segment: { pageNo: number; rect: NonNullable<SourceRef['rect']> },
+  label: string
+): PdfLinkedNoteRegion {
+  return {
+    id: `${filePath}:mindmap:${block.id}:${segment.pageNo}:${getSourceRefRectKey(segment.rect)}`,
+    paperPath: filePath,
+    noteId: `mindmap_${hashString(filePath)}`,
+    noteBlockId: block.id,
+    mineruBlockId: block.id,
+    mineruBlock: block,
+    pageNo: segment.pageNo,
+    rect: segment.rect,
+    rawType: block.rawType || block.type,
+    label: label || getMineruBlockPlainText(block).trim() || block.caption || '脑图节点'
+  }
+}
+
+function normalizeMindmapNodeLabel(label: string): string {
+  return label
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/（[^）]*）/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/[·•/\\|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function getMineruBlockMindmapLabel(block: MineruParseBlock): string {
+  if (block.type === 'heading') {
+    return block.text?.trim() || block.caption?.trim() || block.rawType
+  }
+
+  return block.caption?.trim() || getMineruBlockPlainText(block)
+}
+
 function getPdfLinkedRegionDedupeKey(region: PdfLinkedNoteRegion): string {
   const rect = region.rect
   const rectKey = [
@@ -8014,6 +11791,18 @@ function isNoteDirtyForDocument(savedNotes: NoteDocument[], note: NoteDocument):
   }
 
   return serializeNoteDocument(savedNote) !== serializeNoteDocument(note)
+}
+
+function getNoteExportFormatLabel(format: NoteExportFormat): string {
+  if (format === 'pdf') {
+    return 'PDF'
+  }
+
+  if (format === 'word') {
+    return 'Word'
+  }
+
+  return 'Markdown'
 }
 
 function isNoteDirty(

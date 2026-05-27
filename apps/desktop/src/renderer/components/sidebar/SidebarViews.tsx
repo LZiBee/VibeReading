@@ -1,5 +1,5 @@
 ﻿import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement } from 'react'
+import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactElement, ReactNode } from 'react'
 import { countNoteTextCharacters } from '@thesis-agent/notes'
 import type { NoteDocument } from '@thesis-agent/notes'
 import {
@@ -30,10 +30,12 @@ import type {
   AiConversation,
   AiConversationsByPaperPath,
   AiGraphSelectTarget,
+  EditorTab,
   FavoriteItemsByKey,
   FavoriteTarget,
   LibraryStructure,
   LibrarySortMode,
+  MindmapsByPaperPath,
   NotesByPaperPath,
   OpenNoteIdsByPaperPath,
   PdfDisplayNamesByPath,
@@ -917,26 +919,68 @@ export function CurrentPdfNotes({
 export function CurrentPdfGraph({
   openPdfPaths,
   selectedPdfPath,
+  activeEditor,
   pdfDisplayNamesByPath,
   aiConversationsByPaperPath,
   activeAiConversationIdsByPaperPath,
   focusedAiMessageId,
   onAiGraphNodeSelect,
-  onPdfEntryRename,
-  onPdfEntryDelete
+  mindmapsByPaperPath,
+  onMindmapEditorOpen
 }: {
   openPdfPaths: string[]
   selectedPdfPath: string
+  activeEditor: EditorTab
   pdfDisplayNamesByPath: PdfDisplayNamesByPath
   aiConversationsByPaperPath: AiConversationsByPaperPath
   activeAiConversationIdsByPaperPath: Record<string, string>
   focusedAiMessageId: string
   onAiGraphNodeSelect: (target: AiGraphSelectTarget) => void
-  onPdfEntryRename: (filePath: string) => void
-  onPdfEntryDelete: (filePath: string) => void
+  mindmapsByPaperPath: MindmapsByPaperPath
+  onMindmapEditorOpen: (filePath?: string) => void
 }): ReactElement {
-  const visiblePdfPaths = openPdfPaths.length > 0 ? openPdfPaths : selectedPdfPath ? [selectedPdfPath] : []
+  const visiblePdfPaths = useMemo(
+    () => [...new Set((openPdfPaths.length > 0 ? openPdfPaths : selectedPdfPath ? [selectedPdfPath] : []).filter(Boolean))],
+    [openPdfPaths, selectedPdfPath]
+  )
+  const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(() => new Set(['ai', 'mindmap']))
   const [expandedQuestionIds, setExpandedQuestionIds] = useState<Set<string>>(() => new Set())
+  const aiPaperRows = useMemo(
+    () =>
+      visiblePdfPaths.map((filePath) => {
+        const conversations = aiConversationsByPaperPath[filePath] ?? []
+        const activeConversationId = activeAiConversationIdsByPaperPath[filePath] ?? ''
+        const rootQuestionNodes = conversations
+          .filter((conversation) => !conversation.parentAnswerId)
+          .flatMap((conversation) => buildAiQuestionTree(conversation, conversations))
+        const questionCount = countAiQuestionTreeNodes(rootQuestionNodes)
+
+        return {
+          filePath,
+          conversations,
+          activeConversationId,
+          rootQuestionNodes,
+          questionCount
+        }
+      }),
+    [activeAiConversationIdsByPaperPath, aiConversationsByPaperPath, visiblePdfPaths]
+  )
+  const totalQuestionCount = aiPaperRows.reduce((total, item) => total + item.questionCount, 0)
+  const generatedMindmapCount = visiblePdfPaths.filter((filePath) => Boolean(mindmapsByPaperPath[filePath])).length
+
+  const toggleFolderExpanded = useCallback((folderId: string): void => {
+    setExpandedFolderIds((current) => {
+      const next = new Set(current)
+
+      if (next.has(folderId)) {
+        next.delete(folderId)
+      } else {
+        next.add(folderId)
+      }
+
+      return next
+    })
+  }, [])
 
   const toggleQuestionExpanded = useCallback((questionId: string): void => {
     setExpandedQuestionIds((current) => {
@@ -953,76 +997,158 @@ export function CurrentPdfGraph({
   }, [])
 
   return (
-    <>
-      {visiblePdfPaths.map((filePath) => {
-        const displayName = getPdfDisplayName(filePath, pdfDisplayNamesByPath)
-        const conversations = aiConversationsByPaperPath[filePath] ?? []
-        const activeConversationId = activeAiConversationIdsByPaperPath[filePath] ?? ''
-        const rootQuestionNodes = conversations
-          .filter((conversation) => !conversation.parentAnswerId)
-          .flatMap((conversation) => buildAiQuestionTree(conversation, conversations))
-        const questionCount = countAiQuestionTreeNodes(rootQuestionNodes)
+    <div className="graph-readonly-tree library-tree" role="tree" aria-label="Graph 分类">
+      <GraphReadonlyFolder
+        id="ai"
+        title="AI"
+        icon="codicon-comment-discussion"
+        countLabel={`${totalQuestionCount} 个问题`}
+        expanded={expandedFolderIds.has('ai')}
+        onToggle={toggleFolderExpanded}
+      >
+        {aiPaperRows.length > 0 ? (
+          aiPaperRows.map(({ filePath, conversations, activeConversationId, rootQuestionNodes, questionCount }) => {
+            const displayName = getPdfDisplayName(filePath, pdfDisplayNamesByPath)
+            const isPaperActive = activeEditor === 'graph' && filePath === selectedPdfPath
 
-        return (
-          <div key={filePath} className="graph-tree-paper">
-            <div className={filePath === selectedPdfPath ? 'resource-row-shell active' : 'resource-row-shell'}>
-              <button
-                className="resource-row clickable"
-                type="button"
-                title={filePath}
-                onClick={() => {
-                  const conversationId = activeConversationId || conversations[0]?.id || ''
-                  if (conversationId) {
-                    onAiGraphNodeSelect({ paperPath: filePath, conversationId })
-                  }
-                }}
-              >
-                <span className="codicon codicon-file-pdf" aria-hidden="true" />
-                <div>
-                  <strong>{displayName}</strong>
-                  <small>{questionCount} 个问题</small>
+            return (
+              <div key={filePath} className="graph-readonly-paper">
+                <div className={isPaperActive ? 'resource-row-shell graph-file-row-shell active' : 'resource-row-shell graph-file-row-shell'}>
+                  <button
+                    className="resource-row graph-file-row clickable"
+                    type="button"
+                    title={filePath}
+                    onClick={() => {
+                      const conversationId = activeConversationId || conversations[0]?.id || ''
+                      if (conversationId) {
+                        onAiGraphNodeSelect({ paperPath: filePath, conversationId })
+                      }
+                    }}
+                  >
+                    <span className="graph-file-row-icon" aria-hidden="true">
+                      <span className="codicon codicon-file-pdf" />
+                    </span>
+                    <div className="graph-file-row-main">
+                      <strong>{displayName}</strong>
+                      <span className="graph-file-row-meta">{questionCount > 0 ? `${questionCount} 个问题` : '暂无 AI 问答'}</span>
+                    </div>
+                  </button>
                 </div>
-              </button>
-              <div className="entry-row-actions">
-                <EntryRowActionButton
-                  icon="codicon-edit"
-                  title={`重命名 ${displayName}`}
-                  ariaLabel={`重命名 ${displayName}`}
-                  onClick={() => onPdfEntryRename(filePath)}
-                />
-                <EntryRowActionButton
-                  icon="codicon-trash"
-                  title={`删除 ${displayName}`}
-                  ariaLabel={`删除 ${displayName}`}
-                  variant="danger"
-                  onClick={() => onPdfEntryDelete(filePath)}
-                />
+                <div className="graph-file-children">
+                  {rootQuestionNodes.length > 0 ? (
+                    <div className="graph-tree" role="tree" aria-label={`${displayName} 问题树`}>
+                      {rootQuestionNodes.map((node) => (
+                        <AiGraphQuestionNode
+                          key={node.id}
+                          node={node}
+                          activeConversationId={activeConversationId}
+                          focusedAiMessageId={focusedAiMessageId}
+                          expandedQuestionIds={expandedQuestionIds}
+                          onQuestionToggle={toggleQuestionExpanded}
+                          onAiGraphNodeSelect={onAiGraphNodeSelect}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="graph-tree-empty graph-readonly-empty">
+                      <span className="codicon codicon-comment" aria-hidden="true" />
+                      <span>AI 提问后会在这里生成问题树</span>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-            {rootQuestionNodes.length > 0 ? (
-              <div className="graph-tree" role="tree" aria-label={`${displayName} 问题树`}>
-                {rootQuestionNodes.map((node) => (
-                    <AiGraphQuestionNode
-                      key={node.id}
-                      node={node}
-                      activeConversationId={activeConversationId}
-                      focusedAiMessageId={focusedAiMessageId}
-                      expandedQuestionIds={expandedQuestionIds}
-                      onQuestionToggle={toggleQuestionExpanded}
-                      onAiGraphNodeSelect={onAiGraphNodeSelect}
-                    />
-                  ))}
+            )
+          })
+        ) : (
+          <GraphReadonlyEmpty icon="codicon-file-pdf" label="打开论文后会显示 AI 问答树" />
+        )}
+      </GraphReadonlyFolder>
+
+      <GraphReadonlyFolder
+        id="mindmap"
+        title="思维导图"
+        icon="codicon-type-hierarchy-sub"
+        countLabel={`${generatedMindmapCount} / ${visiblePdfPaths.length} 个已生成`}
+        expanded={expandedFolderIds.has('mindmap')}
+        onToggle={toggleFolderExpanded}
+      >
+        {visiblePdfPaths.length > 0 ? (
+          visiblePdfPaths.map((filePath) => {
+            const displayName = getPdfDisplayName(filePath, pdfDisplayNamesByPath)
+            const mindmap = mindmapsByPaperPath[filePath]
+            const isMindmapActive = activeEditor === 'mindmap' && filePath === selectedPdfPath
+
+            return (
+              <div key={filePath} className={isMindmapActive ? 'resource-row-shell graph-file-row-shell active' : 'resource-row-shell graph-file-row-shell'}>
+                <button
+                  className="resource-row graph-file-row clickable"
+                  type="button"
+                  title={filePath}
+                  onClick={() => onMindmapEditorOpen(filePath)}
+                >
+                  <span className="graph-file-row-icon" aria-hidden="true">
+                    <span className="codicon codicon-type-hierarchy-sub" />
+                  </span>
+                  <div className="graph-file-row-main">
+                    <strong>{mindmap?.paperTitle || displayName}</strong>
+                    <span className="graph-file-row-meta">{mindmap ? `${mindmap.nodeCount} 个节点` : '未生成脑图'}</span>
+                  </div>
+                </button>
               </div>
-            ) : (
-              <div className="graph-tree-empty">
-                <span className="codicon codicon-type-hierarchy-sub" aria-hidden="true" />
-                <span>AI 提问后会在这里生成问题树</span>
-              </div>
-            )}
-          </div>
-        )
-      })}
-    </>
+            )
+          })
+        ) : (
+          <GraphReadonlyEmpty icon="codicon-type-hierarchy-sub" label="打开论文后会显示对应 markmap" />
+        )}
+      </GraphReadonlyFolder>
+    </div>
+  )
+}
+
+function GraphReadonlyFolder({
+  id,
+  title,
+  icon,
+  countLabel,
+  expanded,
+  children,
+  onToggle
+}: {
+  id: string
+  title: string
+  icon: string
+  countLabel: string
+  expanded: boolean
+  children: ReactNode
+  onToggle: (folderId: string) => void
+}): ReactElement {
+  return (
+    <div className="library-folder-tree-item graph-readonly-folder" data-folder-id={id}>
+      <button
+        className="library-folder-row graph-readonly-folder-row"
+        type="button"
+        role="treeitem"
+        aria-expanded={expanded}
+        onClick={() => onToggle(id)}
+      >
+        <span className={expanded ? 'codicon codicon-chevron-down' : 'codicon codicon-chevron-right'} aria-hidden="true" />
+        <span className="graph-folder-main">
+          <span className={`codicon ${icon}`} aria-hidden="true" />
+          <strong>{title}</strong>
+          <span className="graph-folder-count">{countLabel}</span>
+        </span>
+      </button>
+      {expanded ? <div className="library-folder-children graph-readonly-folder-children">{children}</div> : null}
+    </div>
+  )
+}
+
+function GraphReadonlyEmpty({ icon, label }: { icon: string; label: string }): ReactElement {
+  return (
+    <div className="graph-tree-empty graph-readonly-empty">
+      <span className={`codicon ${icon}`} aria-hidden="true" />
+      <span>{label}</span>
+    </div>
   )
 }
 
@@ -1142,6 +1268,7 @@ export function PrimaryViewContent({
   view,
   openPdfPaths,
   selectedPdfPath,
+  activeEditor,
   libraryStructure,
   pdfFileInfoByPath,
   pdfDisplayNamesByPath,
@@ -1154,6 +1281,7 @@ export function PrimaryViewContent({
   aiConversationsByPaperPath,
   activeAiConversationIdsByPaperPath,
   focusedAiMessageId,
+  mindmapsByPaperPath,
   librarySortMode,
   onLibrarySortModeChange,
   onPdfTabSelect,
@@ -1166,6 +1294,7 @@ export function PrimaryViewContent({
   onOpenNote,
   onOpenPdf,
   onAiGraphNodeSelect,
+  onMindmapEditorOpen,
   onFavoriteToggle,
   onNoteEntryRename,
   onNoteEntryDelete,
@@ -1174,6 +1303,7 @@ export function PrimaryViewContent({
   view: PrimaryView
   openPdfPaths: string[]
   selectedPdfPath: string
+  activeEditor: EditorTab
   libraryStructure: LibraryStructure
   pdfFileInfoByPath: PdfFileInfoByPath
   pdfDisplayNamesByPath: PdfDisplayNamesByPath
@@ -1186,6 +1316,7 @@ export function PrimaryViewContent({
   aiConversationsByPaperPath: AiConversationsByPaperPath
   activeAiConversationIdsByPaperPath: Record<string, string>
   focusedAiMessageId: string
+  mindmapsByPaperPath: MindmapsByPaperPath
   librarySortMode: LibrarySortMode
   onLibrarySortModeChange: (sortMode: LibrarySortMode) => void
   onPdfTabSelect: (filePath: string) => void
@@ -1198,6 +1329,7 @@ export function PrimaryViewContent({
   onOpenNote: (filePath: string, noteId?: string) => void
   onOpenPdf: () => void
   onAiGraphNodeSelect: (target: AiGraphSelectTarget) => void
+  onMindmapEditorOpen: (filePath?: string) => void
   onFavoriteToggle: (target: FavoriteTarget, label: string) => void
   onNoteEntryRename: (filePath: string, noteId: string) => void
   onNoteEntryDelete: (filePath: string, noteId: string) => void
@@ -1272,13 +1404,14 @@ export function PrimaryViewContent({
             <CurrentPdfGraph
               openPdfPaths={openPdfPaths}
               selectedPdfPath={selectedPdfPath}
+              activeEditor={activeEditor}
               pdfDisplayNamesByPath={pdfDisplayNamesByPath}
               aiConversationsByPaperPath={aiConversationsByPaperPath}
               activeAiConversationIdsByPaperPath={activeAiConversationIdsByPaperPath}
               focusedAiMessageId={focusedAiMessageId}
               onAiGraphNodeSelect={onAiGraphNodeSelect}
-              onPdfEntryRename={onPdfEntryRename}
-              onPdfEntryDelete={onPdfEntryDelete}
+              mindmapsByPaperPath={mindmapsByPaperPath}
+              onMindmapEditorOpen={onMindmapEditorOpen}
             />
           )
         ) : (

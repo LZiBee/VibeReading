@@ -69,6 +69,14 @@
   background: transparent;
 }
 
+.settings-activity {
+  margin-top: 0;
+}
+
+.settings-activity > .codicon {
+  font-size: 23px;
+}
+
 .activity .profile-avatar-small {
   width: 25px;
   height: 25px;
@@ -1165,11 +1173,115 @@ body.library-dragging * {
   min-width: 0;
 }
 
+.graph-readonly-tree {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.graph-readonly-folder {
+  min-width: 0;
+}
+
+.graph-readonly-folder-row {
+  grid-template-columns: 16px minmax(0, 1fr);
+}
+
+.graph-folder-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.graph-folder-main > .codicon {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.graph-folder-main > strong {
+  flex: 1 1 auto;
+}
+
+.graph-folder-count {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
+
+.graph-readonly-folder-children {
+  padding-left: 0;
+}
+
+.graph-readonly-paper {
+  display: grid;
+  min-width: 0;
+}
+
+.graph-file-row-shell {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.graph-file-row {
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 6px;
+  min-height: 32px;
+  padding-left: 28px;
+}
+
+.graph-file-row > .graph-file-row-icon {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+
+.graph-file-row-main {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.graph-file-row-main > strong,
+.graph-file-row-meta {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.35;
+}
+
+.graph-file-row-main > strong {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.graph-file-row-meta {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.graph-file-children {
+  display: grid;
+  min-width: 0;
+  margin-left: 19px;
+  border-left: 1px solid rgba(132, 144, 156, 0.42);
+  padding-left: 4px;
+}
+
 .graph-tree {
   display: grid;
   gap: 1px;
   min-width: 0;
-  padding: 2px 0 8px;
+  padding: 2px 0 6px;
 }
 
 .graph-tree-branch {
@@ -1295,6 +1407,10 @@ body.library-dragging * {
   padding: 2px 8px 8px 22px;
   color: var(--text-secondary);
   font-size: 12px;
+}
+
+.graph-readonly-empty {
+  padding-left: 28px;
 }
 
 .resource-row small,

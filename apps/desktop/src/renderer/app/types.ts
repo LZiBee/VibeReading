@@ -8,7 +8,7 @@ import type {
 } from '../../preload/thesis-agent'
 
 export type PrimaryView = 'library' | 'favorites' | 'note' | 'graph'
-export type EditorTab = 'pdf' | 'profile'
+export type EditorTab = 'pdf' | 'graph' | 'mindmap' | 'profile'
 export type DockPanelId = 'library' | 'editor' | 'note' | 'ai'
 export type ClosableDockPanelId = Exclude<DockPanelId, 'library'>
 export type WorkbenchLayoutDirection = 'horizontal' | 'vertical'
@@ -242,6 +242,7 @@ export type AiQuickAction = {
   label: string
   icon: string
   prompt: string
+  command?: string
 }
 
 export type FavoriteTarget =
@@ -297,6 +298,22 @@ export type OpenNoteIdsByPaperPath = Record<string, string[]>
 export type PendingNoteTemplateByPaperPath = Record<string, boolean>
 export type AiConversationsByPaperPath = Record<string, AiConversation[]>
 export type ActiveAiConversationIdsByPaperPath = Record<string, string>
+
+export type PaperMindmapDocument = {
+  id: string
+  paperPath: string
+  paperTitle: string
+  markdown: string
+  model: string
+  nodeCount: number
+  maxDepth: number
+  warnings: string[]
+  skillVersion: string
+  createdAt: string
+  updatedAt: string
+}
+
+export type MindmapsByPaperPath = Record<string, PaperMindmapDocument>
 
 export type PendingNoteCloseRequest = {
   filePath: string

@@ -14,16 +14,20 @@ import {
 } from '@thesis-agent/notes'
 import type { AnnotationKind, PdfAnnotation, PdfAnnotationColor, PdfAnnotationRect, PdfSelection } from '@thesis-agent/pdf'
 import { createId } from '@thesis-agent/shared'
-import type { MineruParseResult } from '@thesis-agent/shared'
+import type { MineruParseResult, SelectionExplainResult } from '@thesis-agent/shared'
 import * as pdfjs from 'pdfjs-dist'
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist'
-import type { PdfLinkedNoteRegion } from '../app/types'
-import type { PersistedMineruSettingsState } from '../../preload/thesis-agent'
+import type { PdfLinkedNoteRegion, ReasoningEffort } from '../app/types'
+import type { PersistedMineruSettingsState, PersistedPdfEditorSettingsState } from '../../preload/thesis-agent'
 import {
   getMineruBlockPlainText,
   mineruBlockDragMimeType,
   serializeMineruBlockDragPayload
 } from '../app/mineruDrag'
+import {
+  createPdfExcerptDropPayload,
+  pdfExcerptDragMimeType
+} from './note/milkdown/pdfExcerptDrag'
 import pdfWorkerSrc from '../pdf.worker?worker&url'
 import {
   AnnotationPreview,
@@ -76,10 +80,12 @@ type PdfViewerProps = {
   isActive?: boolean
   onOpenPdf: () => void
   onStatus: (status: string) => void
-  onAskSelection: () => void
+  onAskSelection: (selection: PdfSelectionSnapshot) => void
+  onExplainSelection: (selection: PdfSelectionSnapshot) => Promise<SelectionExplainResult>
   onCreatePdfNote?: () => void
   onParseWithMineru?: () => void
   onGenerateMineruNote?: () => void
+  onOpenFullTranslation?: () => void
   onHideMineruLinkedRegions?: () => void
   onShowMineruLinkedRegions?: () => void
   onSessionChange?: (session: PdfViewerSession) => void
@@ -94,6 +100,31 @@ type PdfViewerProps = {
   onLinkedNoteRegionSelect?: (region: PdfLinkedNoteRegion) => void
   onMineruClearCurrentCache?: () => void
   onMineruClearAllCaches?: () => void
+  pptSettings?: PdfPptToolbarSettings
+  pptModelOptions?: string[]
+  pptReasoningOptions?: PdfPptReasoningOption[]
+  pdfEditorSettings?: PersistedPdfEditorSettingsState
+  isPptGenerating?: boolean
+  isMindmapGenerating?: boolean
+  onPptSettingsChange?: (patch: Partial<PdfPptToolbarSettings>) => void
+  onGeneratePpt?: () => void
+  onGenerateMindmap?: () => void
+}
+
+export type PdfPptToolbarSettings = {
+  model: string
+  reasoningEffort: ReasoningEffort
+  targetSlideCount: number
+  includeAgenda: boolean
+  includeReferences: boolean
+  includeAppendix: boolean
+  includeNotes: boolean
+  includeAiAnswers: boolean
+}
+
+export type PdfPptReasoningOption = {
+  value: ReasoningEffort
+  label: string
 }
 
 type PdfPageBitmapCacheEntry = {
@@ -154,9 +185,11 @@ export function PdfViewer({
   onOpenPdf,
   onStatus,
   onAskSelection,
+  onExplainSelection,
   onCreatePdfNote,
   onParseWithMineru,
   onGenerateMineruNote,
+  onOpenFullTranslation,
   onHideMineruLinkedRegions,
   onShowMineruLinkedRegions,
   onSessionChange,
@@ -170,7 +203,16 @@ export function PdfViewer({
   focusedPdfSourceRegionNonce = 0,
   onLinkedNoteRegionSelect,
   onMineruClearCurrentCache,
-  onMineruClearAllCaches
+  onMineruClearAllCaches,
+  pptSettings,
+  pptModelOptions = [],
+  pptReasoningOptions = [],
+  pdfEditorSettings,
+  isPptGenerating = false,
+  isMindmapGenerating = false,
+  onPptSettingsChange,
+  onGeneratePpt,
+  onGenerateMindmap
 }: PdfViewerProps): ReactElement {
   const stageRef = useRef<HTMLDivElement | null>(null)
   const pageRef = useRef<HTMLDivElement | null>(null)
@@ -178,6 +220,7 @@ export function PdfViewer({
   const textLayerRef = useRef<HTMLDivElement | null>(null)
   const noteInputRef = useRef<HTMLTextAreaElement | null>(null)
   const panStateRef = useRef<PanState | null>(null)
+  const selectionExplainRequestRef = useRef(0)
   const initialSessionRef = useRef<PdfViewerSession | undefined>(session)
   const onSessionChangeRef = useRef<PdfViewerProps['onSessionChange']>(onSessionChange)
   const hasRestoredScrollRef = useRef(false)
@@ -191,14 +234,17 @@ export function PdfViewer({
   const [documentProxy, setDocumentProxy] = useState<PDFDocumentProxy | null>(null)
   const [pageNumber, setPageNumber] = useState(() => Math.max(1, Math.floor(session?.pageNumber ?? 1)))
   const [pageCount, setPageCount] = useState(0)
-  const [scale, setScale] = useState(() => clampScale(session?.scale ?? 1))
+  const [scale, setScale] = useState(() => clampScale(session?.scale ?? pdfEditorSettings?.defaultScale ?? 1))
   const [pageSize, setPageSize] = useState<PageSize | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isRendering, setIsRendering] = useState(false)
   const [isPanning, setIsPanning] = useState(false)
   const [error, setError] = useState<string>('')
-  const [activeTool, setActiveTool] = useState<PdfToolMode>('select')
+  const [activeTool, setActiveTool] = useState<PdfToolMode>(pdfEditorSettings?.defaultTool ?? 'select')
   const [activeSelection, setActiveSelection] = useState<PdfSelectionSnapshot | null>(null)
+  const [selectionExplainLoading, setSelectionExplainLoading] = useState(false)
+  const [selectionExplainResult, setSelectionExplainResult] = useState<SelectionExplainResult | null>(null)
+  const [selectionExplainError, setSelectionExplainError] = useState('')
   const [activeColor, setActiveColor] = useState<PdfAnnotationColor>(defaultPresetColors[0] ?? '#ffd84d')
   const [activeOpacity, setActiveOpacity] = useState(defaultHighlightOpacity)
   const [activeThickness, setActiveThickness] = useState(defaultHighlightThickness)
@@ -210,18 +256,42 @@ export function PdfViewer({
   const [annotations, setAnnotations] = useState<PdfAnnotation[]>([])
   const [isMineruMenuOpen, setIsMineruMenuOpen] = useState(false)
   const [isMineruConfigOpen, setIsMineruConfigOpen] = useState(false)
+  const [isPptConfigOpen, setIsPptConfigOpen] = useState(false)
   const [annotationHistory, setAnnotationHistory] = useState<string[]>([])
   const [documentReloadKey, setDocumentReloadKey] = useState(0)
-  const [renderMode, setRenderMode] = useState<PdfRenderMode>('compatibility')
-  const [browseMode, setBrowseMode] = useState<PdfBrowseMode>('page')
+  const [renderMode, setRenderMode] = useState<PdfRenderMode>(pdfEditorSettings?.defaultRenderMode ?? 'compatibility')
+  const [browseMode, setBrowseMode] = useState<PdfBrowseMode>(pdfEditorSettings?.defaultBrowseMode ?? 'page')
   const [isOverviewOpen, setIsOverviewOpen] = useState(false)
   const [bitmapPageDataUrl, setBitmapPageDataUrl] = useState('')
   const [readingSeconds, setReadingSeconds] = useState(() => Math.max(0, Math.floor(session?.readingSeconds ?? 0)))
+  useEffect(() => {
+    selectionExplainRequestRef.current += 1
+    setSelectionExplainLoading(false)
+    setSelectionExplainResult(null)
+    setSelectionExplainError('')
+  }, [activeSelection])
   const [isReaderEngaged, setIsReaderEngaged] = useState(false)
   const [isWindowFocused, setIsWindowFocused] = useState(() => (typeof document === 'undefined' ? true : document.hasFocus()))
   const [contextMenuPosition, setContextMenuPosition] = useState<{ left: number; top: number } | null>(null)
   const [focusingSourceRegionId, setFocusingSourceRegionId] = useState('')
   const focusSourceRegionTimerRef = useRef<number | null>(null)
+  const pptToolbarModelOptions = useMemo(
+    () => buildPdfPptModelOptions(pptSettings?.model ?? '', pptModelOptions),
+    [pptModelOptions, pptSettings?.model]
+  )
+
+  const stopSelectionPopoverPointer = useCallback((event: ReactPointerEvent<HTMLDivElement>): void => {
+    event.stopPropagation()
+  }, [])
+
+  const stopSelectionPopoverMouseUp = useCallback((event: ReactMouseEvent<HTMLDivElement>): void => {
+    event.stopPropagation()
+  }, [])
+
+  const preventSelectionActionFocusSteal = useCallback((event: ReactMouseEvent<HTMLDivElement>): void => {
+    event.stopPropagation()
+    preventFocusSteal(event)
+  }, [])
 
   const fileName = useMemo(() => (filePath ? filePath.split(/[\\/]/).at(-1) ?? filePath : ''), [filePath])
   const paperId = useMemo(() => (filePath ? `paper_${createStableHash(filePath)}` : 'paper_empty'), [filePath])
@@ -487,11 +557,14 @@ export function PdfViewer({
     if (!filePath) {
       setDocumentProxy(null)
       setPageNumber(1)
-      setScale(1)
+      setScale(clampScale(pdfEditorSettings?.defaultScale ?? 1))
       setPageCount(0)
       setPageSize(null)
       setAnnotations([])
       setAnnotationHistory([])
+      setActiveTool(pdfEditorSettings?.defaultTool ?? 'select')
+      setRenderMode(pdfEditorSettings?.defaultRenderMode ?? 'compatibility')
+      setBrowseMode(pdfEditorSettings?.defaultBrowseMode ?? 'page')
       setActiveSelection(null)
       setSelectedAnnotationId(null)
       setBitmapPageDataUrl('')
@@ -515,9 +588,12 @@ export function PdfViewer({
       setDocumentProxy(null)
       setPageSize(null)
       setPageCount(0)
-      setScale(clampScale(initialSession?.scale ?? 1))
+      setScale(clampScale(initialSession?.scale ?? pdfEditorSettings?.defaultScale ?? 1))
       setAnnotations([])
       setAnnotationHistory([])
+      setActiveTool(pdfEditorSettings?.defaultTool ?? 'select')
+      setRenderMode(pdfEditorSettings?.defaultRenderMode ?? 'compatibility')
+      setBrowseMode(pdfEditorSettings?.defaultBrowseMode ?? 'page')
       setActiveSelection(null)
       setSelectedAnnotationId(null)
       setIsOverviewOpen(false)
@@ -1075,6 +1151,83 @@ export function PdfViewer({
     }
   }, [activeSelection, onStatus])
 
+  const explainSelection = useCallback(async (): Promise<void> => {
+    if (!activeSelection || selectionExplainLoading) {
+      return
+    }
+
+    const requestId = selectionExplainRequestRef.current + 1
+    selectionExplainRequestRef.current = requestId
+    setSelectionExplainLoading(true)
+    setSelectionExplainResult(null)
+    setSelectionExplainError('')
+    onStatus('正在获取选区释义/翻译')
+
+    try {
+      const result = await onExplainSelection(activeSelection)
+      if (selectionExplainRequestRef.current !== requestId) {
+        return
+      }
+
+      setSelectionExplainResult(result)
+      onStatus(result.route === 'dictionary' ? '已返回本地词典释义' : result.route === 'translation' ? '已返回选区翻译' : '已返回选区处理结果')
+    } catch (error) {
+      if (selectionExplainRequestRef.current !== requestId) {
+        return
+      }
+
+      const message = error instanceof Error ? error.message : '选区释义/翻译失败'
+      setSelectionExplainError(message)
+      onStatus(message)
+    } finally {
+      if (selectionExplainRequestRef.current === requestId) {
+        setSelectionExplainLoading(false)
+      }
+    }
+  }, [activeSelection, onExplainSelection, onStatus, selectionExplainLoading])
+
+  const copySelectionExplainResult = useCallback(async (): Promise<void> => {
+    if (!selectionExplainResult) {
+      return
+    }
+
+    const text = formatSelectionExplainResult(selectionExplainResult)
+    if (!text) {
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(text)
+      onStatus('已复制释义/翻译结果')
+    } catch {
+      onStatus('复制释义/翻译结果失败')
+    }
+  }, [onStatus, selectionExplainResult])
+
+  const startPdfSelectionDrag = useCallback((event: ReactDragEvent<HTMLDivElement>): void => {
+    if (!activeSelection || !filePath) {
+      return
+    }
+
+    const target = event.target
+    if (target instanceof Element && target.closest('button, textarea')) {
+      event.preventDefault()
+      return
+    }
+
+    const payload = createPdfExcerptDropPayload({
+      filePath,
+      pageNo: activeSelection.pageNo,
+      text: activeSelection.text,
+      sourceRef: activeSelection.sourceRef
+    })
+
+    event.dataTransfer.effectAllowed = 'copy'
+    event.dataTransfer.setData(pdfExcerptDragMimeType, JSON.stringify(payload))
+    event.dataTransfer.setData('text/plain', activeSelection.text)
+    onStatus('拖动当前 PDF 选区到笔记可生成摘录节点')
+  }, [activeSelection, filePath, onStatus])
+
   const addAnnotation = useCallback(
     (
       kind: AnnotationKind,
@@ -1575,6 +1728,7 @@ export function PdfViewer({
           onClick={() => {
             setIsMineruConfigOpen((current) => !current)
             setIsMineruMenuOpen(false)
+            setIsPptConfigOpen(false)
           }}
         >
           <span className="codicon codicon-settings-gear" aria-hidden="true" />
@@ -1588,9 +1742,55 @@ export function PdfViewer({
           onClick={() => {
             setIsMineruMenuOpen((current) => !current)
             setIsMineruConfigOpen(false)
+            setIsPptConfigOpen(false)
           }}
         >
           <span className="codicon codicon-sparkle" aria-hidden="true" />
+        </button>
+        <button
+          className="pdf-tool-button"
+          type="button"
+          title="生成论文脑图"
+          aria-label="生成论文脑图"
+          disabled={!filePath || isLoading || isRendering || isMindmapGenerating || !onGenerateMindmap}
+          onClick={() => {
+            setIsMineruConfigOpen(false)
+            setIsMineruMenuOpen(false)
+            setIsPptConfigOpen(false)
+            onGenerateMindmap?.()
+          }}
+        >
+          <span className="codicon codicon-type-hierarchy-sub" aria-hidden="true" />
+        </button>
+        <button
+          className="pdf-tool-button pdf-full-translation-tool-button"
+          type="button"
+          title={hasMineruResult ? '全文翻译' : '请先用 MinerU 解析当前 PDF'}
+          aria-label="全文翻译"
+          disabled={!filePath || isLoading || isRendering || !hasMineruResult || !onOpenFullTranslation}
+          onClick={() => {
+            setIsMineruConfigOpen(false)
+            setIsMineruMenuOpen(false)
+            setIsPptConfigOpen(false)
+            onOpenFullTranslation?.()
+          }}
+        >
+          <span className="codicon codicon-globe" aria-hidden="true" />
+        </button>
+        <button
+          className={isPptConfigOpen ? 'pdf-tool-button pdf-ppt-tool-button active' : 'pdf-tool-button pdf-ppt-tool-button'}
+          type="button"
+          title="生成 PPT"
+          aria-label="生成 PPT"
+          aria-pressed={isPptConfigOpen}
+          disabled={!filePath || isLoading || isRendering || isPptGenerating || !pptSettings || !onGeneratePpt}
+          onClick={() => {
+            setIsPptConfigOpen((current) => !current)
+            setIsMineruConfigOpen(false)
+            setIsMineruMenuOpen(false)
+          }}
+        >
+          <span className="pdf-ppt-label" aria-hidden="true">PPT</span>
         </button>
         <AnnotationColorPicker
           activeColor={activeColor}
@@ -1806,6 +2006,114 @@ export function PdfViewer({
           </div>
         </div>
       ) : null}
+      {isPptConfigOpen && pptSettings && onPptSettingsChange && onGeneratePpt ? (
+        <div className="pdf-floating-panel ppt-config-panel">
+          <div className="mineru-panel-title">
+            <strong>PPT 生成</strong>
+            <button
+              className="icon-button"
+              type="button"
+              title="关闭 PPT 配置"
+              onClick={() => setIsPptConfigOpen(false)}
+            >
+              <span className="codicon codicon-close" aria-hidden="true" />
+            </button>
+          </div>
+          <div className="mineru-menu-hint">
+            PPT 使用独立 AI 配置；这里快速调整本次生成的模型、思考强度和内容结构。
+          </div>
+          <label>
+            <span>模型</span>
+            <select
+              value={pptSettings.model}
+              onChange={(event) => onPptSettingsChange({ model: event.target.value })}
+            >
+              {pptToolbarModelOptions.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>思考强度</span>
+            <select
+              value={pptSettings.reasoningEffort}
+              onChange={(event) => onPptSettingsChange({ reasoningEffort: event.target.value as ReasoningEffort })}
+            >
+              {pptReasoningOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>目标页数：{pptSettings.targetSlideCount} 页</span>
+            <input
+              type="range"
+              min={8}
+              max={12}
+              step={1}
+              value={pptSettings.targetSlideCount}
+              onChange={(event) => onPptSettingsChange({ targetSlideCount: Number(event.target.value) })}
+            />
+          </label>
+          <div className="ppt-config-grid">
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={pptSettings.includeAgenda}
+                onChange={(event) => onPptSettingsChange({ includeAgenda: event.target.checked })}
+              />
+              <span>包含目录页</span>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={pptSettings.includeReferences}
+                onChange={(event) => onPptSettingsChange({ includeReferences: event.target.checked })}
+              />
+              <span>包含参考文献页</span>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={pptSettings.includeAppendix}
+                onChange={(event) => onPptSettingsChange({ includeAppendix: event.target.checked })}
+              />
+              <span>包含附录页</span>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={pptSettings.includeNotes}
+                onChange={(event) => onPptSettingsChange({ includeNotes: event.target.checked })}
+              />
+              <span>纳入关联笔记</span>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={pptSettings.includeAiAnswers}
+                onChange={(event) => onPptSettingsChange({ includeAiAnswers: event.target.checked })}
+              />
+              <span>纳入 AI 回答</span>
+            </label>
+          </div>
+          <button
+            className="note-toolbar-button"
+            type="button"
+            disabled={!filePath || isPptGenerating}
+            onClick={() => {
+              setIsPptConfigOpen(false)
+              onGeneratePpt()
+            }}
+          >
+            {isPptGenerating ? '正在生成...' : '生成当前 PDF PPT'}
+          </button>
+        </div>
+      ) : null}
       {isMineruMenuOpen ? (
         <div className="pdf-floating-panel mineru-menu-panel">
           <div className="mineru-panel-title">
@@ -1991,17 +2299,55 @@ export function PdfViewer({
                       ))}
                   </div>
 
-                  {activeSelection && (
-                    <div className="selection-popover" style={selectionPopoverStyle(activeSelection.anchor)}>
-                      <div className="selection-popover-actions" onMouseDown={preventFocusSteal}>
-                        <button type="button" title="复制" onClick={() => void copySelection()}>
+                  {activeSelection && pdfEditorSettings?.showSelectionPopover !== false && (
+                    <div
+                      className="selection-popover"
+                      style={selectionPopoverStyle(activeSelection.anchor)}
+                      draggable
+                      onPointerDown={stopSelectionPopoverPointer}
+                      onMouseUp={stopSelectionPopoverMouseUp}
+                      onDragStart={startPdfSelectionDrag}
+                    >
+                      <div className="selection-popover-actions" onMouseDown={preventSelectionActionFocusSteal}>
+                        <button
+                          type="button"
+                          title="复制"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void copySelection()
+                          }}
+                        >
                           <span className="codicon codicon-copy" aria-hidden="true" />
                         </button>
-                        <button type="button" title="批注" onClick={openNoteComposer}>
+                        <button
+                          type="button"
+                          title="批注"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            openNoteComposer()
+                          }}
+                        >
                           <span className="codicon codicon-comment" aria-hidden="true" />
                         </button>
-                        <button type="button" title="询问 AI" onClick={onAskSelection}>
+                        <button
+                          type="button"
+                          title="询问 AI"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            onAskSelection(activeSelection)
+                          }}
+                        >
                           <span className="codicon codicon-sparkle" aria-hidden="true" />
+                        </button>
+                        <button
+                          type="button"
+                          title="释义/翻译"
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            void explainSelection()
+                          }}
+                        >
+                          <span className="codicon codicon-book" aria-hidden="true" />
                         </button>
                       </div>
                       {isNoteComposerOpen && (
@@ -2023,6 +2369,12 @@ export function PdfViewer({
                             </button>
                           </div>
                         </div>
+                      )}
+                      {renderSelectionExplainCard(
+                        selectionExplainLoading,
+                        selectionExplainResult,
+                        selectionExplainError,
+                        copySelectionExplainResult
                       )}
                     </div>
                   )}
@@ -2111,7 +2463,106 @@ export function PdfViewer({
   )
 }
 
+function renderSelectionExplainCard(
+  isLoading: boolean,
+  result: SelectionExplainResult | null,
+  error: string,
+  onCopy: () => Promise<void>
+): ReactElement | null {
+  if (isLoading) {
+    return (
+      <div className="selection-explain-card loading" onMouseDown={preventFocusSteal}>
+        <span className="codicon codicon-loading codicon-modifier-spin" aria-hidden="true" />
+        <span>正在生成释义/翻译...</span>
+      </div>
+    )
+  }
 
+  if (error) {
+    return (
+      <div className="selection-explain-card error" onMouseDown={preventFocusSteal}>
+        <div className="selection-explain-card-title">
+          <span>处理失败</span>
+        </div>
+        <p>{error}</p>
+      </div>
+    )
+  }
 
+  if (!result) {
+    return null
+  }
 
+  const modeLabel = result.route === 'dictionary' ? '词典释义' : result.route === 'translation' ? '翻译' : '回退结果'
+  const dictionary = result.dictionary
+  const translation = result.translation
 
+  return (
+    <div className={`selection-explain-card ${result.route}`} onMouseDown={preventFocusSteal}>
+      <div className="selection-explain-card-title">
+        <span>{modeLabel}</span>
+        <div className="selection-explain-card-actions">
+          {result.cached ? <span className="selection-explain-cache">缓存</span> : null}
+          <button type="button" title="复制结果" onClick={() => void onCopy()}>
+            <span className="codicon codicon-copy" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+
+      {dictionary ? (
+        <div className="selection-explain-dictionary">
+          <div className="selection-explain-headword">
+            <strong>{dictionary.lemma}</strong>
+            {dictionary.pos ? <span>{dictionary.pos}</span> : null}
+          </div>
+          {dictionary.senses.map((sense, index) => (
+            <p key={sense.id ?? `${sense.zh}:${index}`}>
+              {sense.pos ? <span className="selection-explain-pos">{sense.pos}</span> : null}
+              {sense.zh}
+            </p>
+          ))}
+          {dictionary.phrases.length > 0 ? (
+            <div className="selection-explain-phrases">
+              {dictionary.phrases.slice(0, 4).map((phrase) => (
+                <div key={phrase.phrase}>
+                  <span>{phrase.phrase}</span>
+                  <strong>{phrase.translation}</strong>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {translation ? (
+        <div className="selection-explain-translation">
+          <p>{translation.targetText}</p>
+        </div>
+      ) : null}
+
+      {result.fallbackReason ? <p className="selection-explain-fallback">{result.fallbackReason}</p> : null}
+    </div>
+  )
+}
+
+function formatSelectionExplainResult(result: SelectionExplainResult): string {
+  if (result.dictionary) {
+    const senses = result.dictionary.senses.map((sense) => `${sense.pos ? `${sense.pos} ` : ''}${sense.zh}`)
+    const phrases = result.dictionary.phrases.map((phrase) => `${phrase.phrase}: ${phrase.translation}`)
+    return [result.dictionary.lemma, ...senses, ...phrases].join('\n')
+  }
+
+  if (result.translation) {
+    return result.translation.targetText
+  }
+
+  return result.fallbackReason ?? ''
+}
+
+function buildPdfPptModelOptions(currentModel: string, modelOptions: string[]): string[] {
+  const normalizedCurrentModel = currentModel.trim()
+  const normalizedOptions = modelOptions.map((model) => model.trim()).filter(Boolean)
+  const options = normalizedCurrentModel ? [normalizedCurrentModel, ...normalizedOptions] : normalizedOptions
+
+  return options.filter((model, index, allModels) => allModels.indexOf(model) === index)
+}

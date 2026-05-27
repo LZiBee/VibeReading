@@ -1,0 +1,240 @@
+{
+  "entries": [
+    {
+      "query": "diffusion",
+      "lemma": "diffusion",
+      "pos": "noun",
+      "senses": [
+        {
+          "pos": "noun",
+          "zh": "扩散；在机器学习中常指逐步加噪与去噪生成过程",
+          "en": "The spread of something, or a generative modeling process based on noise diffusion and denoising.",
+          "domain": "machine-learning"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "diffusion model",
+          "translation": "扩散模型",
+          "note": "常用于图像、音频、视频和分子生成任务",
+          "confidence": 0.98
+        },
+        {
+          "phrase": "diffusion models",
+          "translation": "扩散模型",
+          "confidence": 0.95
+        }
+      ],
+      "confidence": 0.96,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "domain adaptation",
+      "lemma": "domain adaptation",
+      "pos": "noun phrase",
+      "senses": [
+        {
+          "pos": "noun phrase",
+          "zh": "领域自适应；让模型从源领域迁移到目标领域并降低分布差异影响的方法",
+          "en": "Methods that adapt a model trained on a source domain to a target domain with a distribution shift.",
+          "domain": "machine-learning"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "domain adaptation",
+          "translation": "领域自适应",
+          "confidence": 0.99
+        },
+        {
+          "phrase": "unsupervised domain adaptation",
+          "translation": "无监督领域自适应",
+          "confidence": 0.96
+        }
+      ],
+      "confidence": 0.98,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "representation",
+      "lemma": "representation",
+      "pos": "noun",
+      "senses": [
+        {
+          "pos": "noun",
+          "zh": "表示；模型内部对数据、特征或概念的编码形式",
+          "en": "An encoded form of data, features, or concepts used by a model.",
+          "domain": "machine-learning"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "representation learning",
+          "translation": "表示学习",
+          "confidence": 0.97
+        }
+      ],
+      "confidence": 0.94,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "embedding",
+      "lemma": "embedding",
+      "pos": "noun",
+      "senses": [
+        {
+          "pos": "noun",
+          "zh": "嵌入向量；把离散对象映射到连续向量空间后的表示",
+          "en": "A continuous vector representation of an object such as a word, sentence, node, or document.",
+          "domain": "machine-learning"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "text embedding",
+          "translation": "文本嵌入",
+          "confidence": 0.96
+        },
+        {
+          "phrase": "embedding space",
+          "translation": "嵌入空间",
+          "confidence": 0.94
+        }
+      ],
+      "confidence": 0.95,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "baseline",
+      "lemma": "baseline",
+      "pos": "noun",
+      "senses": [
+        {
+          "pos": "noun",
+          "zh": "基线方法；用于对比新方法效果的参考模型或实验设置",
+          "en": "A reference method or setting used to compare against a proposed approach.",
+          "domain": "research-method"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "strong baseline",
+          "translation": "强基线",
+          "confidence": 0.93
+        }
+      ],
+      "confidence": 0.95,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "ablation",
+      "lemma": "ablation",
+      "pos": "noun",
+      "senses": [
+        {
+          "pos": "noun",
+          "zh": "消融实验；移除或替换模型组件以评估其贡献的实验",
+          "en": "An experiment that removes or changes components to estimate their contribution.",
+          "domain": "research-method"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "ablation study",
+          "translation": "消融实验",
+          "confidence": 0.98
+        }
+      ],
+      "confidence": 0.95,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "generalization",
+      "lemma": "generalization",
+      "pos": "noun",
+      "senses": [
+        {
+          "pos": "noun",
+          "zh": "泛化能力；模型在未见数据或新场景上的表现能力",
+          "en": "The ability of a model to perform well on unseen data or new settings.",
+          "domain": "machine-learning"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "out-of-distribution generalization",
+          "translation": "分布外泛化",
+          "confidence": 0.96
+        }
+      ],
+      "confidence": 0.94,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "state-of-the-art",
+      "lemma": "state-of-the-art",
+      "pos": "adjective",
+      "senses": [
+        {
+          "pos": "adjective",
+          "zh": "当前最先进的；在某项任务或指标上达到领先水平的",
+          "en": "At the leading level of performance or technique for a task.",
+          "domain": "research-method"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "state-of-the-art performance",
+          "translation": "当前最先进的性能",
+          "confidence": 0.95
+        }
+      ],
+      "confidence": 0.93,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "contrastive learning",
+      "lemma": "contrastive learning",
+      "pos": "noun phrase",
+      "senses": [
+        {
+          "pos": "noun phrase",
+          "zh": "对比学习；通过拉近正样本、推远负样本来学习表示的方法",
+          "en": "Representation learning that brings positive pairs closer and pushes negative pairs apart.",
+          "domain": "machine-learning"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "contrastive learning",
+          "translation": "对比学习",
+          "confidence": 0.99
+        }
+      ],
+      "confidence": 0.98,
+      "source": "academic-core.en-zh"
+    },
+    {
+      "query": "fine-tuning",
+      "lemma": "fine-tuning",
+      "pos": "noun",
+      "senses": [
+        {
+          "pos": "noun",
+          "zh": "微调；在预训练模型基础上用目标任务数据继续训练",
+          "en": "Further training a pretrained model on task-specific or domain-specific data.",
+          "domain": "machine-learning"
+        }
+      ],
+      "phrases": [
+        {
+          "phrase": "parameter-efficient fine-tuning",
+          "translation": "参数高效微调",
+          "confidence": 0.96
+        }
+      ],
+      "confidence": 0.94,
+      "source": "academic-core.en-zh"
+    }
+  ]
+}

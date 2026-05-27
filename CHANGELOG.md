@@ -8,9 +8,51 @@ https://github.com/LZiBee/VibeReading.git
 
 ## [Unreleased]
 ### 新增
+- AI 栏新增“代码解析”Phase 1 入口：可通过 Workbench 命令打开进度弹窗，检查当前 PDF 的 MinerU 解析状态；未解析时会提示先解析并在解析完成后继续。
+- AI 栏“代码解析”Phase 2 支持从 MinerU Markdown/blocks 自动识别 GitHub 仓库候选，并可在弹窗中选择候选或手动输入 GitHub URL 进行确认。
+- AI 栏“代码解析”Phase 3 接入 Main 侧仓库准备：确认 GitHub URL 后可拉取或复用本地缓存，并扫描语言分布与 README、配置、入口脚本、Notebook 和源码关键文件。
+- PDF 工具栏新增“全文翻译”入口：仅在当前 PDF 已有 MinerU 解析结果时启用，基于 MinerU heading/paragraph/list block 逐段翻译，并在 Milkdown 宽屏模式生成原文/译文横向对照表。
+- 全文翻译新增批量翻译链路：默认每次将 5 个 MinerU block 交给翻译 AI 生成结构化 JSON 译文，减少逐段串行请求次数，并支持在设置中调整批量大小。
+- Milkdown 全文对照模式新增只读阅览体验：隐藏主要编辑工具栏，鼠标进入文档显示圆形阅读指针，并为原文/译文句子生成相同 `sentenceId` 的联动高亮。
+- Graph 左侧栏新增只读分类文件夹：AI 问答树归入 `AI`，每篇文章对应的 markmap 归入 `思维导图`，并复用 Library 栏的文件夹/文件排版。
+- markmap 脑图节点支持点击跳回 PDF：识别节点中的页码锚点，自动切到对应 PDF 页，并优先匹配 MinerU 章节区域进行定位高亮。
+- PDF 工具栏新增论文脑图入口：基于 MinerU 解析结果调用 AI 提炼要点，生成并展示 markmap 脑图；未解析时会先提示用户解析 PDF，不再走快速文本生成路径。
+- PPT 生成新增视觉资产优先策略：优先把 MinerU 解析出的论文原图、图表和表格截图接入 DeckSpec；没有原图时自动生成流程图、思维导图或实验链路图，并由 PPT 导出器渲染为可编辑图示。
+- 左下角新增全局设置入口，集中配置 AI 栏、翻译 AI、PPT AI、MinerU 解析和 PDF 编辑器默认行为；翻译与 PPT 现在可独立选择模型、思考强度和翻译批量大小，不再被 AI 栏配置强制绑定。
+- PDF 选区浮层新增“释义/翻译”统一入口：单词和短语优先走 `packages/dictionary` 本地词典，句子和段落通过 `selection:explain` IPC 回退到当前 AI 模型翻译，并在浮层内显示结果卡片与复制按钮。
+- 新增 PPT 生成首批基础能力：定义 `DeckSpec`/导出任务协议，新增 `packages/ppt` 导出包骨架，并接入 `pptxgenjs` 作为后续 `.pptx` 导出主路径。
+- 接入 PPT 工作流与受控导出桥接：`packages/ai` 可从论文、笔记、摘录和 AI 回答材料生成 `DeckSpec`，桌面端通过 Main/Preload 暴露 `.pptx` 导出 API。
+- 新增 PPT 内容质量层：在生成 `DeckSpec` 前增加 Evidence 清洗、`PaperDigest`、`SlidePlan` 和 `SlideDraft` 规划骨架，过滤重复论文标题、表格残片、孤立数字和低信息密度关键词堆。
+- PPT 生成开始接入真实 AI：从论文、笔记或选区导出 PPT 时会复用当前 AI Provider 生成结构化 SlideDraft JSON，解析失败、模型调用失败或 AI 缺页时停止导出。
+- PPT 生成新增进度弹窗：展示材料整理、AI 调用、草稿解析、保存导出和失败详情，便于定位真实 AI 链路卡在哪一步。
+- PDF 顶部工具栏新增 `PPT` 按钮和生成配置面板，可直接选择模型、思考强度、目标页数，并控制是否包含目录页、参考文献页、附录页、关联笔记和 AI 回答。
+- PPT 生成入口纳入 Workbench 命令系统：新增 `ppt.generateFromPaper`、`ppt.generateFromNote`、`ppt.generateFromSelection`、`ppt.exportDeck`、`ppt.retryJob` 和 `ppt.openJobHistory` 命令骨架。
+- 顶部菜单新增 `PPT` 入口，可从当前 PDF、关联笔记、AI 回答和笔记图片资产生成学术汇报 DeckSpec，并通过受控导出桥接保存为 `.pptx`。
+- 新增 `npm run verify:ppt` 最小闭环验证脚本，可用假论文材料生成 `DeckSpec` 并导出临时 `.pptx`，并覆盖重复标题、表格残片和孤立数字等 PPT 内容噪声回归。
+- Graph 主编辑区新增 AI 问答图画布：点击左侧 Graph 入口后，会用 React Flow 横向展示当前论文的提问节点，并可点击节点定位到对应 AI 对话。
+- Markdown/Milkdown 笔记编辑器现在覆盖自由笔记、论文模板、PDF 分段截图模板和 MinerU/PDF 解析生成笔记入口，并支持保存时保留 PDF 摘录、AI 回答、公式和图片等结构化块。
+- Milkdown/Markdown 笔记编辑器新增多格式导出入口，可将当前编辑内容导出为 Markdown、Word 或 PDF 文件。
+- Milkdown 实验编辑器工具栏新增正文/H4-H6、有序列表、Todo 列表、删除线、行内代码、链接、行内公式、代码块、分割线和图片入口，减少手写 Markdown 或依赖斜杠菜单。
+- Milkdown 实验编辑器支持将 MinerU 解析出的图片、图表和带截图表格直接拖入为真实图片块，并配置 Crepe ImageBlock 上传回调，让本地图片上传以 data URL 方式保留在编辑器内。
 - Note 图片块支持拖拽图片按落点插入，自动选择左绕、右绕或居中排版；点击图片后可拖拽缩放，并在侧边图片编辑栏切换图文环绕与做轻量裁剪微调。
 - AI 配置支持导入和保存全局 `进阶.md` 规则文件；每次对话都会先注入这份 Markdown 规则，再按统一格式输出公式与结构化答案。
 ### 变更
+- 脑图生成进度弹窗改为宽屏横向布局：步骤与调试信息分栏展示，长预览在弹窗内部滚动，底部操作按钮保持可见。
+- PPT AI 的自制图示策略从流程图优先调整为脑图优先：没有合适论文原图时默认生成 Mermaid `mindmap` 结构脑图，只有确实需要表达严格顺序、数据流或因果链时才使用流程图。
+- Note 默认编辑方式切换为 Markdown/Milkdown；旧版块编辑器退为兼容路径，不再作为新建和打开笔记的默认入口。
+- 翻译/词典和 PPT AI 的 API Key 留空时会自动使用 AI 栏默认共享 Key；MinerU 解析保持独立 Key，不参与共享。
+- PPT 保存阶段失败时会保留已生成的 DeckSpec，可在进度弹窗中直接“重试保存”，不再因为重新选路径或文件占用而整轮重新调用 AI。
+- PPT 导出成功后的状态栏统一显示“AI 版 PPT”，且配置缺失、缺少 API Key、模型失败、JSON 无法解析或 AI 草稿缺页时不再导出规则版 PPT。
+- AI 调用在 `/responses` 遇到 502/503/504 时会继续尝试 `/chat/completions` fallback；PPT 草稿 prompt 会压缩证据文本，降低中转站临时不可用概率。
+- AI 问答图节点交互拆分为“定位提问”和“展开回答”：提问区与定位按钮会跳转 AI 栏，展开按钮会在画布内显示完整回答，并可继续定位到对应回答。
+- AI 消息发送 IPC 支持为结构化任务传入 `maxOutputTokens`，PPT 草稿生成会请求更大的输出预算，降低 JSON 被截断的概率。
+- PPT 生成的 Renderer 材料组装逻辑已从 `App.tsx` 抽离到独立 helper，便于后续继续接真实截图、审计提示和任务状态 UI。
+- AI 问答图会跟随当前 AI 消息自动居中对应节点；从图谱跳转或切换当前对话后，画布会平滑移动到当前提问所在位置。
+- Milkdown 中的 MinerU/PDF 来源文段改为左侧引用竖线加粗样式，去掉蓝色超链接和下划线外观，同时保留 Ctrl/Command 回跳 PDF 原文的来源能力。
+- Milkdown 打开旧版带字体/字号样式的 Note 时不再把 `<span style="...">` 作为正文源码显示，字体类 HTML 包装会在进入 Milkdown 前转回纯文本。
+- Milkdown 恢复 MinerU/PDF 来源摘录时会清理来源 quote 中残留的 `<span>`、`\<span>` 和 `&lt;span&gt;` 包装，避免正文前后出现转义标签。
+- Milkdown 会把段落内任意位置的 PDF/MinerU 来源链接恢复为 `pdf_excerpt`，避免含行内公式的来源段退化成普通段落后丢失左侧引用竖线。
+- Milkdown 中的 MinerU 公式块改为只显示 KaTeX 公式本体，去掉外层来源卡片、标题、原始 LaTeX 文本和底部提示，同时保留 Ctrl/Command 回跳 PDF 原文的来源属性。
 - MinerU 生成或拖入 Note 的来源文字改为整块纯色背景显示；按住 Ctrl/Command 时像 Word 超链接一样由文字本身负责跳回 PDF，编辑来源块后整块来源链接永久失效，并立即退回普通文字段样式。
 - Note 图片编辑改为更轻的图片内联工具列，不再占用右侧大块编辑面板；选中图片后会显示贴近图片的小型工具列，并支持四边与四角共 8 个方向缩放。
 - Note 图片拖拽插入现在会按松手位置放到对应段落之间，并支持左绕/右绕浮动排版，让后续文字自动避让分流。
@@ -28,6 +70,21 @@ https://github.com/LZiBee/VibeReading.git
 - AI 分支对话现在会折叠分支前的历史，并在顶部显示“以往对话已折叠”提示；若在旧回答处分支，原回答之后的既有后续会自动整理成另一条分支。
 - AI 面板进一步兼容裸 LaTeX 输出：支持将 `\\[ ... \\]`、`\\( ... \\)`、` ```latex ` / ` ```tex ` 代码块和独立成段的常见裸公式预处理为可渲染的数学表达式。
 ### 修复
+- 修复 PPT 生成中 AI 返回 Mermaid 自制图时可能失败的问题：现在会忽略 JSON 内部 Mermaid 代码围栏对 JSON 提取的干扰，更稳地解析 `flowchart`、`graph` 和 `mindmap` 常见节点写法，并且导出器兜底路径不再把 `MERMAID 图示待渲染` 或 Mermaid 源码块写进正式 PPT。
+- 修复 PPT 保存到已被 PowerPoint、图片预览或同步程序占用的文件路径时只能整轮生成失败、无法重新保存的问题；现在会把 `EBUSY`/占用类系统错误提示为“文件正在被占用”，并支持直接重试保存导出步骤。
+- 修复 PDF 选区浮层中“释义/翻译”和“询问 AI”点击后缺少可见反馈的问题：浮层按钮事件会隔离 PDF 选区重算，“询问 AI”会打开 AI 面板并把选区载入输入框。
+- 修复空 PDF 占位视图中选区提问回调参数未补 `filePath`，导致桌面端类型检查失败的问题。
+- 修复 Electron 主进程启动时将 `@thesis-agent/dictionary` / `@thesis-agent/ppt` 外部化为运行时 `require()`，导致内部 ESM 包触发 `ERR_PACKAGE_PATH_NOT_EXPORTED` 并弹出启动错误的问题。
+- 修复 PDF/MinerU 来源摘录移入 Milkdown 笔记后，正文前后残留 `********` 这类 Markdown 加粗标记的问题；来源段会清理旧数据中的连续星号包装，同时继续保持加粗引用样式和 PDF 回跳能力。
+- 修复 MinerU 没有打上公式标签、把公式夹在正文段落里时 Milkdown 仍按普通斜体文本显示的问题；当前 `pdf_excerpt` 会识别正文中的行内 LaTeX 片段并渲染为 KaTeX 行内公式，并会全篇修正已有行内公式节点中的 OCR 双反斜杠，英文正文仍保持可读。
+- 修复含 `$...$` / `\(...\)` 明确分隔符的来源正文公式在恢复 `pdf_excerpt` 后又作为原始 LaTeX 文本显示的问题；当前会优先按分隔符切出行内公式，再走 OCR 无分隔符兜底识别。
+- 修复 Milkdown 中部分 MinerU/OCR 公式因 `\\ldots`、`\\mathbb { R }`、`x _ { 1 }` 这类 token 化 LaTeX 无法渲染的问题；现在会先归一化重复反斜杠、空格化上下标和命令参数，并把独立公式来源段恢复为公式节点。
+- 修复 Milkdown 切换或重载 MinerU 公式后只显示“公式 · 第 x 页”普通链接的问题；编辑器会在初始化后把公式来源占位链接恢复为 KaTeX 公式块，并兼容 `$$...$$`、`\[...\]`、`\(...\)` 外层分隔符，不影响 Ctrl/Command 回跳 PDF 原文。
+- 修复 Milkdown 中 MinerU 公式占位链接被 LaTeX 下标、分式、括号或引号打断后露出 Markdown 链接源码的问题；公式占位现在只使用稳定短标签，LaTeX 内容继续从结构化来源引用恢复，不影响 PDF 原文回跳。
+- 修复 Milkdown 中拖入 MinerU 公式被当成普通摘录文本渲染的问题；当前公式会以独立 KaTeX 公式块显示，并继续保留 Ctrl/Command 回跳 PDF 原文的来源属性。
+- 修复 Milkdown 实验编辑器中 PDF/MinerU 解析文段拖入后只显示普通链接的问题；当前拖入内容会以 `pdf_excerpt` 摘录卡片显示，并保留旧版 NoteBlock 来源写入与 PDF 回跳链路。
+- 修复 PDF/MinerU 解析文段拖到 Milkdown 上方时无法落下的问题；当前拖拽悬停阶段只检查自定义 MIME 类型，避免 Chromium 在 `dragover` 阶段禁止读取 payload 后阻断 drop。
+- 修复 Milkdown 中拖入 MinerU 文段显示不完整的问题；当前摘录卡片会复用旧版 MinerU 纯文本提取逻辑，并从来源引用中恢复完整多行 quote。
 - 修复 Note 内 MinerU 来源文段改字号后不重新占位的问题；现在文本框会在字号、字体或容器尺寸变化时重新测量高度，避免内容被后续文字遮住。
 - 修复顶部标签页在打开较多 PDF、Note 或 AI 对话时只能靠点击切换、无法顺手左右浏览的问题；现在可直接用鼠标滚轮在标签条上横向滚动浏览。
 - 修复 Ctrl/Command+左键从 Note 来源块跳回 PDF 时缺少原文段落定位反馈的问题；当前会跳到对应页，并在 PDF 原文区域短暂闪动高亮。
@@ -81,6 +138,4 @@ https://github.com/LZiBee/VibeReading.git
 ### 鏂囨。
 
 - 寤虹珛 AI 鍗忎綔鎬荤害瀹氥€?- 寤虹珛浠ｇ爜鍖鸿鏄庛€?- 寤虹珛鏃ュ織璁板綍瑙勮寖銆?
-
-
 

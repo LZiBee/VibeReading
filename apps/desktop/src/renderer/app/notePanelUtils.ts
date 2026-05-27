@@ -70,6 +70,18 @@ export function canUseNoteBlockBulletList(type: NoteBlockType): boolean {
   return type === 'paragraph' || type === 'heading' || type === 'quote' || type === 'pdf_excerpt' || type === 'ai_answer' || type === 'question_node'
 }
 
+export function getNoteListMarker(block: NoteBlock, lineIndex = 0): string {
+  if (!canUseNoteBlockBulletList(block.type)) {
+    return ''
+  }
+
+  if (block.style?.listStyle === 'ordered') {
+    return `${lineIndex + 1}.`
+  }
+
+  return block.style?.listStyle === 'bullet' ? '-' : ''
+}
+
 export function getBlockTextAreaRows(block: NoteBlock): number {
   if (block.type === 'formula') {
     return 3

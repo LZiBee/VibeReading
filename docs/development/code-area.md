@@ -21,6 +21,8 @@ THESIS_AGENT/
     rag/                分块、检索、重排、上下文组装
     graph/              问题节点、知识图谱、布局、边关系
     citations/          参考文献解析、悬浮预览、元数据补全、Zotero 接入
+    dictionary/         本地词典、术语归一化、选区意图判断、短语匹配
+    ppt/                PPT 演示文稿导出、模板、主题、版式审计
     db/                 SQLite、迁移、仓储、全文索引、向量索引
     shared/             通用类型、Result、事件、常量、跨包协议
   docs/                 架构、需求、开发规范
@@ -50,6 +52,10 @@ THESIS_AGENT/
 
 `packages/citations` 负责参考文献能力。正文引用识别、文末条目解析、DOI/arXiv/OpenAlex/Crossref 元数据补全、Zotero Web API 同步适配、Zotero translators 抓取适配都放这里。
 
+`packages/dictionary` 负责本地词典能力。选区文本归一化、单词/短语意图判断、基础词形还原、本地术语表查询和结果排序都放这里。它不直接调用 AI，不访问数据库，也不负责 PDF UI 展示。
+
+`packages/ppt` 负责 PPT 演示文稿导出能力。它只把跨包 `DeckSpec` 渲染成 `.pptx`，并处理模板、主题、版式、图片、表格、引用页和导出前审计。它不直接调用 AI、不直接读取数据库，也不负责 Renderer 文件保存交互。
+
 `packages/db` 是唯一数据库访问层。数据库迁移、Repository、FTS5、sqlite-vec 都放这里。UI 不直接写 SQL。
 
 `packages/shared` 只能放无业务副作用的通用内容，例如类型、错误结构、事件协议、工具函数。
@@ -71,6 +77,8 @@ THESIS_AGENT/
 | 文本分块、检索、上下文构造 | `packages/rag/src` |
 | 图谱节点、边、布局、导出 | `packages/graph/src` |
 | 引用识别、参考文献、悬浮预览、Zotero 接入 | `packages/citations/src` |
+| 本地词典、选区意图判断、术语归一化 | `packages/dictionary/src` |
+| PPT 导出、主题、模板、版式审计 | `packages/ppt/src` |
 | 数据库 schema、迁移、仓储 | `packages/db/src` |
 | 跨模块类型和协议 | `packages/shared/src` |
 

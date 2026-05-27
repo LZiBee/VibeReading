@@ -1,8 +1,20 @@
 import type { NoteDocument } from '@thesis-agent/notes'
-import type { MineruModelVersion, MineruParseResult } from '@thesis-agent/shared'
+import type {
+  BatchTranslationRequest,
+  BatchTranslationResult,
+  CodeRepositoryPreparationInput,
+  CodeRepositoryPreparationResult,
+  DeckSpec,
+  MineruModelVersion,
+  MineruParseResult,
+  PptExportResult,
+  SelectionExplainRequest,
+  SelectionExplainResult
+} from '@thesis-agent/shared'
 
 export type PersistedPrimaryView = 'library' | 'favorites' | 'note' | 'graph'
-export type PersistedEditorTab = 'pdf' | 'profile'
+export type PersistedEditorTab = 'pdf' | 'graph' | 'mindmap' | 'profile'
+export type PersistedNoteEditorEngine = 'legacy' | 'milkdown'
 export type PersistedDockPanelId = 'library' | 'editor' | 'note' | 'ai'
 export type PersistedDockLayoutDirection = 'horizontal' | 'vertical'
 export type PersistedDockLayoutNode = PersistedDockPanelId | PersistedDockSplitNode
@@ -66,10 +78,14 @@ export type ClipboardImagePayload = {
   height: number
   size: number
 }
-export type NoteExportFormat = 'word' | 'pdf'
+export type NoteExportFormat = 'word' | 'pdf' | 'markdown'
 export type NoteExportResult = {
   canceled: boolean
   format: NoteExportFormat
+  filePath?: string
+}
+export type PptDeckExportResult = PptExportResult & {
+  canceled: boolean
   filePath?: string
 }
 export type PersistedImageAttachment = ClipboardImagePayload & {
@@ -85,6 +101,33 @@ export type PersistedAiSettingsState = {
   requiresOpenAiAuth: boolean
   systemPrompt: string
   apiKey: string
+}
+export type PersistedTranslationSettingsState = {
+  targetLanguage: string
+  dictionaryEnabled: boolean
+  fullTextBatchSize: number
+  ai: PersistedAiSettingsState
+}
+export type PersistedPptGenerationSettingsState = {
+  targetSlideCount: number
+  includeAgenda: boolean
+  includeReferences: boolean
+  includeAppendix: boolean
+  includeNotes: boolean
+  includeAiAnswers: boolean
+}
+export type PersistedPdfEditorSettingsState = {
+  defaultTool: 'select' | 'highlight'
+  defaultBrowseMode: 'scroll' | 'page'
+  defaultRenderMode: 'compatibility' | 'pdfjs'
+  defaultScale: number
+  showSelectionPopover: boolean
+}
+export type PersistedAppSettingsState = {
+  translation: PersistedTranslationSettingsState
+  pptAi: PersistedAiSettingsState
+  pptGeneration: PersistedPptGenerationSettingsState
+  pdfEditor: PersistedPdfEditorSettingsState
 }
 export type PersistedMineruSettingsState = {
   apiKey: string
@@ -107,6 +150,7 @@ export type PersistedMineruSettingsState = {
 export type PersistedWorkbenchState = {
   activeView: PersistedPrimaryView
   activeEditor: PersistedEditorTab
+  noteEditorEngine?: PersistedNoteEditorEngine
   libraryPdfPaths?: string[]
   openPdfPaths: string[]
   selectedPdfPath: string
@@ -198,6 +242,7 @@ export type PersistedAppState = {
   updatedAt: string
   workbench?: PersistedWorkbenchState
   aiSettings?: PersistedAiSettingsState
+  appSettings?: PersistedAppSettingsState
   mineruSettings?: PersistedMineruSettingsState
   mineruResultsByPaperPath?: Record<string, MineruParseResult>
   hiddenMineruOverlayByPaperPath?: Record<string, boolean>
@@ -237,7 +282,8 @@ export type ThesisAgentApi = {
     height: number
   }) => Promise<ClipboardImagePayload>
   readClipboardImage: () => Promise<ClipboardImagePayload | null>
-  exportNote: (input: { format: NoteExportFormat; note: NoteDocument }) => Promise<NoteExportResult>
+  exportNote: (input: { format: NoteExportFormat; note: NoteDocument; markdown?: string }) => Promise<NoteExportResult>
+  exportPptDeck: (input: { deck: DeckSpec; suggestedFileName?: string; preferredFilePath?: string }) => Promise<PptDeckExportResult>
   parsePdfWithMineru: (input: {
     filePath: string
     apiKey: string
@@ -254,6 +300,9 @@ export type ThesisAgentApi = {
   readCachedMineruResult: (filePath: string) => Promise<MineruParseResult | null>
   clearCachedMineruResult: (filePath: string) => Promise<boolean>
   clearAllCachedMineruResults: () => Promise<number>
+  prepareCodeRepository: (input: CodeRepositoryPreparationInput) => Promise<CodeRepositoryPreparationResult>
+  explainSelection: (input: SelectionExplainRequest) => Promise<SelectionExplainResult>
+  translateBatch: (input: BatchTranslationRequest) => Promise<BatchTranslationResult>
   extractPdfLayoutSegments: (input: {
     filePath: string
     maxPages: number
@@ -292,6 +341,7 @@ export type ThesisAgentApi = {
     }>
     prompt: string
     attachments?: PersistedImageAttachment[]
+    maxOutputTokens?: number
   }) => Promise<{
     ok: boolean
     status: number

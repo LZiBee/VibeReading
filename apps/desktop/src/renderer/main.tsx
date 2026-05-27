@@ -1,5 +1,8 @@
 import '@vscode/codicons/dist/codicon.css'
 import 'katex/dist/katex.min.css'
+import '@milkdown/crepe/theme/common/style.css'
+import '@milkdown/crepe/theme/nord.css'
+import '@xyflow/react/dist/style.css'
 import './polyfills/uint8array-to-hex'
 import './polyfills/map-get-or-insert'
 import './polyfills/math-sum-precise'

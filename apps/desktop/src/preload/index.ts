@@ -1,5 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { MineruParseResult } from '@thesis-agent/shared'
+import type {
+  BatchTranslationRequest,
+  BatchTranslationResult,
+  CodeRepositoryPreparationInput,
+  CodeRepositoryPreparationResult,
+  DeckSpec,
+  MineruParseResult,
+  PptExportResult,
+  SelectionExplainRequest,
+  SelectionExplainResult
+} from '@thesis-agent/shared'
 import type { PersistedAppState } from './thesis-agent'
 
 const api = {
@@ -44,12 +54,19 @@ const api = {
       height: number
       size: number
     } | null>,
-  exportNote: (input: { format: 'word' | 'pdf'; note: unknown }) =>
+  exportNote: (input: { format: 'word' | 'pdf' | 'markdown'; note: unknown; markdown?: string }) =>
     ipcRenderer.invoke('note:export', input) as Promise<{
       canceled: boolean
-      format: 'word' | 'pdf'
+      format: 'word' | 'pdf' | 'markdown'
       filePath?: string
     }>,
+  exportPptDeck: (input: { deck: DeckSpec; suggestedFileName?: string; preferredFilePath?: string }) =>
+    ipcRenderer.invoke('ppt:export-deck', input) as Promise<
+      PptExportResult & {
+        canceled: boolean
+        filePath?: string
+      }
+    >,
   parsePdfWithMineru: (input: {
     filePath: string
     apiKey: string
@@ -71,6 +88,12 @@ const api = {
     ipcRenderer.invoke('mineru:clear-cached-result', filePath) as Promise<boolean>,
   clearAllCachedMineruResults: () =>
     ipcRenderer.invoke('mineru:clear-all-cached-results') as Promise<number>,
+  prepareCodeRepository: (input: CodeRepositoryPreparationInput) =>
+    ipcRenderer.invoke('code-analysis:prepare-repository', input) as Promise<CodeRepositoryPreparationResult>,
+  explainSelection: (input: SelectionExplainRequest) =>
+    ipcRenderer.invoke('selection:explain', input) as Promise<SelectionExplainResult>,
+  translateBatch: (input: BatchTranslationRequest) =>
+    ipcRenderer.invoke('translation:batch', input) as Promise<BatchTranslationResult>,
   extractPdfLayoutSegments: (input: { filePath: string; maxPages: number; maxSegments: number }) =>
     ipcRenderer.invoke('pdf:extract-layout-segments', input) as Promise<{
       parser: 'poppler-bbox-layout'
@@ -130,6 +153,7 @@ const api = {
       height: number
       size: number
     }>
+    maxOutputTokens?: number
   }) =>
     ipcRenderer.invoke('ai:send-message', input) as Promise<{
       ok: boolean

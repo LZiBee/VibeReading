@@ -30,6 +30,9 @@
       "@thesis-agent/db": [
         "packages/db/src"
       ],
+      "@thesis-agent/dictionary": [
+        "packages/dictionary/src"
+      ],
       "@thesis-agent/graph": [
         "packages/graph/src"
       ],
@@ -38,6 +41,9 @@
       ],
       "@thesis-agent/pdf": [
         "packages/pdf/src"
+      ],
+      "@thesis-agent/ppt": [
+        "packages/ppt/src"
       ],
       "@thesis-agent/rag": [
         "packages/rag/src"
